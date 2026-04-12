@@ -1,7 +1,7 @@
-# Peru Exporta Backend
+# WhatsApp Sales Backend
 
-Backend robusto para el sistema de ventas automatizado por WhatsApp.
-Base técnica de Hidata Trade Intelligence.
+Modular WhatsApp sales automation backend.
+Multi-tenant, zero cost, open source. Built for Hidata.
 
 ## Stack
 
@@ -9,7 +9,7 @@ Base técnica de Hidata Trade Intelligence.
 - **Framework:** Fastify
 - **ORM:** Prisma
 - **Base de datos:** PostgreSQL (Railway)
-- **WhatsApp:** Evolution API (ya corriendo)
+- **WhatsApp:** Evolution API
 - **IA Clasificador:** Groq + Llama 3.3 (gratis)
 - **Espejo:** Google Sheets API
 - **Deploy:** Railway (automático desde GitHub)
@@ -20,26 +20,24 @@ Base técnica de Hidata Trade Intelligence.
 
 ## Setup en 5 pasos
 
-### Paso 1 — Clonar y configurar
+### Paso 1 — Configurar
 
 ```bash
-git clone https://github.com/berthcodex/peru-exporta-backend
-cd peru-exporta-backend
 cp .env.example .env
 npm install
 ```
 
-### Paso 2 — Configurar variables de entorno
+### Paso 2 — Variables de entorno
 
 Edita `.env` con tus claves:
 
 ```
 DATABASE_URL       → Railway te la da automáticamente
-EVOLUTION_URL      → https://evolution-api-production-f1e7.up.railway.app
+EVOLUTION_URL      → URL de tu instancia Evolution API
 EVOLUTION_API_KEY  → tu clave de Evolution API
 GROQ_API_KEY       → crear en groq.com (gratis)
 GOOGLE_SERVICE_ACCOUNT_JSON → ver instrucciones abajo
-SHEET_ID_JOAN      → ID del Google Sheet de Joan
+SHEET_ID_JOAN      → ID del Google Sheet del vendedor
 ```
 
 ### Paso 3 — Base de datos
@@ -81,19 +79,20 @@ npm run dev
 1. Registrarse en [groq.com](https://groq.com)
 2. API Keys → Create API Key
 3. Pegar en `GROQ_API_KEY`
-4. Free tier: 30 requests/minuto — más que suficiente para 45 leads/día
+4. Free tier: 30 requests/minuto
 
 ---
 
 ## Conectar Evolution API
 
-En el panel de Evolution API, configurar el webhook de cada instancia:
+En el panel de Evolution API, configurar el webhook de cada instancia apuntando a:
 
-- `peru-exporta-joan` → `https://tu-backend.railway.app/webhook`
-- `peru-exporta-cristina` → `https://tu-backend.railway.app/webhook`
-- `peru-exporta-francisco` → `https://tu-backend.railway.app/webhook`
+```
+https://tu-backend.railway.app/webhook
+```
 
-Los tres apuntan al mismo endpoint. El backend los diferencia por `instance` en el body.
+Todas las instancias apuntan al mismo endpoint.
+El backend las diferencia automáticamente por `instance` en el body.
 
 ---
 
@@ -116,7 +115,7 @@ prisma/
 
 ---
 
-## Endpoints disponibles
+## Endpoints
 
 | Método | Ruta | Estado | Descripción |
 |--------|------|--------|-------------|
@@ -128,7 +127,8 @@ prisma/
 
 ---
 
-## Apps Script
+## Multi-tenant
 
-El Apps Script existente **NO se toca** durante la migración.
-Sigue corriendo como backup hasta que el backend esté 100% probado (Semana 3).
+Cada cliente es un tenant independiente.
+Los datos nunca se mezclan — `tenant_id` en todas las tablas.
+Agregar un cliente nuevo = crear un registro en BD + configurar Evolution API.
