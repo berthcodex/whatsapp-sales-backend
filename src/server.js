@@ -89,8 +89,8 @@ try {
   await app.listen({ port: PORT, host: HOST })
   console.log(`
 ╔════════════════════════════════════════╗
-║   Bot Peru Exporta — Backend v1.0      ║
-║   Puerto: ${PORT}                          ║
+║   Hidata - Whatsapp Sales Backend      ║
+║   Puerto: ${PORT}                      ║
 ║   DB: PostgreSQL (Prisma)              ║
 ║   WhatsApp: Evolution API              ║
 ╚════════════════════════════════════════╝
