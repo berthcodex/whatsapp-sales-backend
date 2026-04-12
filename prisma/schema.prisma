@@ -1,0 +1,189 @@
+// prisma/schema.prisma
+// Bot Peru Exporta — Schema completo
+// Multitenant desde el día 1: tenant_id en todas las tablas
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// TENANT — Una empresa = un tenant
+// Peru Exporta es el primer tenant
+// ============================================
+model Tenant {
+  id          String   @id @default(uuid())
+  nombre      String
+  plan        String   @default("free") // free | pro | enterprise
+  activo      Boolean  @default(true)
+  creadoEn    DateTime @default(now())
+  
+  vendedores  Vendedor[]
+  leads       Lead[]
+  mensajes    Mensaje[]
+  flujos      Flujo[]
+  
+  @@map("tenants")
+}
+
+// ============================================
+// VENDEDOR — Joan, Cristina, Francisco
+// Cada uno tiene su instancia de Evolution API
+// ============================================
+model Vendedor {
+  id                  String   @id @default(uuid())
+  tenantId            String
+  nombre              String
+  email               String?
+  passwordHash        String?
+  rol                 String   @default("vendedor") // admin | vendedor
+  instanciaEvolution  String   @unique // "peru-exporta-joan"
+  activo              Boolean  @default(true)
+  creadoEn            DateTime @default(now())
+  
+  tenant    Tenant  @relation(fields: [tenantId], references: [id])
+  leads     Lead[]
+  
+  @@map("vendedores")
+}
+
+// ============================================
+// LEAD — El corazón del sistema
+// Cada lead pertenece a un tenant y un vendedor
+// ============================================
+model Lead {
+  id          String   @id @default(uuid())
+  tenantId    String
+  vendedorId  String
+  
+  // Datos del lead
+  nombre      String?
+  numero      String   // número WhatsApp sin @s.whatsapp.net
+  producto    String?
+  region      String?
+  
+  // Clasificación
+  tipo        String   @default("A") // A | B
+  tipoPreciso String?  // "Tipo A — formación" | "Tipo B — broker"
+  scoreTotal  Int      @default(0)  // scoring ponderado
+  scoreB      Int      @default(0)  // puntos Tipo B acumulados
+  scoreA      Int      @default(0)  // puntos Tipo A acumulados
+  clasificadoPorIA Boolean @default(false) // si usó Groq/Llama
+  
+  // Pipeline
+  prioridad   String   @default("MEDIA") // URGENTE | ALTA | MEDIA
+  estado      String   @default("nuevo") // nuevo | por_llamar | no_contesto | agendado | mat_enviado | cerrado | frio
+  
+  // Tracking
+  primerMensaje   String?  // texto del primer mensaje
+  todosLosMensajes String? // mensajes brutales concatenados
+  ultimoTimestamp  DateTime?
+  
+  // Fechas
+  creadoEn    DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+  fechaLlamada  DateTime?
+  resultado     String?  // resultado de la llamada
+  
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  vendedor  Vendedor @relation(fields: [vendedorId], references: [id])
+  mensajes  Mensaje[]
+  
+  @@unique([numero, vendedorId]) // un lead por número por vendedor
+  @@map("leads")
+}
+
+// ============================================
+// MENSAJE — Historial completo de conversación
+// ============================================
+model Mensaje {
+  id         String   @id @default(uuid())
+  leadId     String
+  tenantId   String
+  direccion  String   // "entrante" | "saliente"
+  contenido  String
+  tipo       String   @default("texto") // texto | imagen | audio | boton
+  enviadoEn  DateTime @default(now())
+  
+  lead    Lead   @relation(fields: [leadId], references: [id])
+  tenant  Tenant @relation(fields: [tenantId], references: [id])
+  
+  @@map("mensajes")
+}
+
+// ============================================
+// FLUJO — Los flujos de mensajes editables
+// Cristina y Francisco pueden editarlos desde el CRM
+// ============================================
+model Flujo {
+  id          String   @id @default(uuid())
+  tenantId    String
+  nombre      String   // "bienvenida" | "reactivacion_1h" | "objecion_precio"
+  descripcion String?
+  activo      Boolean  @default(true)
+  creadoEn    DateTime @default(now())
+  
+  tenant  Tenant @relation(fields: [tenantId], references: [id])
+  pasos   Paso[]
+  
+  @@map("flujos")
+}
+
+// ============================================
+// PASO — Cada mensaje dentro de un flujo
+// ============================================
+model Paso {
+  id          String   @id @default(uuid())
+  flujoId     String
+  orden       Int      // 1, 2, 3...
+  tipo        String   // "mensaje" | "pregunta_botones" | "condicion" | "notificar_vendedor"
+  
+  // Contenido editable por Cristina
+  contenido   String?  // texto del mensaje
+  botones     String?  // JSON: [{"id":"tipo_b","texto":"Ya tengo producto"}]
+  
+  // Condiciones
+  condicion   String?  // JSON: {"campo":"tipo","valor":"B","siguientePasoId":"xxx"}
+  
+  // Timing
+  esperarRespuesta Boolean @default(false)
+  siguientePasoId  String? // null = fin del flujo
+  
+  flujo    Flujo     @relation(fields: [flujoId], references: [id])
+  triggers Trigger[]
+  
+  @@map("pasos")
+}
+
+// ============================================
+// TRIGGER — Cuándo se activa cada paso
+// Los 3 tipos: respuesta, tiempo, evento
+// ============================================
+model Trigger {
+  id              String   @id @default(uuid())
+  pasoId          String
+  tipo            String   // "tiempo" | "keyword" | "evento" | "boton"
+  
+  // Trigger de tiempo
+  minutosEspera   Int?     // 60 = 1 hora, 1440 = 24 horas
+  
+  // Trigger de keyword
+  keywords        String?  // JSON: ["caro","no tengo","precio"]
+  
+  // Trigger de evento
+  evento          String?  // "vendedor_marco_no_contesto" | "imagen_recibida" | "vendedor_marco_cerrado"
+  
+  // Trigger de botón
+  botonId         String?  // "tipo_a" | "tipo_b"
+  
+  siguientePasoId String?
+  accionAlternativa String? // qué pasa si NO se activa
+  
+  paso  Paso @relation(fields: [pasoId], references: [id])
+  
+  @@map("triggers")
+}
