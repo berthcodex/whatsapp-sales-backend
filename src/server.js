@@ -1,86 +1,101 @@
 // src/server.js
-// Servidor principal — Bot Peru Exporta Backend
-// Node.js + Fastify + Prisma + PostgreSQL
+// Hidata — WhatsApp Sales ERP Backend
+// Semana 2: endpoints completos para el CRM
 
 import 'dotenv/config'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import { PrismaClient } from '@prisma/client'
 import { handleWebhook } from './webhook/handler.js'
+import {
+  getLeads,
+  updateLead,
+  sendMensaje,
+  doAccion,
+  getReportes
+} from './api/leads.js'
 
 // ============================================
-// INICIALIZAR PRISMA
+// PRISMA
 // ============================================
 const prisma = new PrismaClient({
-  log: process.env.NODE_ENV === 'development' ? ['query', 'error'] : ['error']
+  log: process.env.NODE_ENV === 'development' ? ['error'] : ['error']
 })
 
 // ============================================
-// INICIALIZAR FASTIFY
+// FASTIFY
 // ============================================
 const app = Fastify({
-  logger: {
-    level: process.env.NODE_ENV === 'development' ? 'info' : 'warn'
-  }
+  logger: false
 })
 
 // ============================================
-// PLUGINS
+// CORS — permite que el CRM React se conecte
 // ============================================
 await app.register(cors, {
   origin: [
+    'https://testing1-crm.vercel.app',
     'https://peru-exporta-crm.vercel.app',
     'http://localhost:5173',
     'http://localhost:3000'
   ],
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 })
 
 // ============================================
-// RUTAS — SEMANA 1
+// RUTAS — HEALTH
 // ============================================
-
-// Health check — Railway lo usa para saber si el server está vivo
 app.get('/health', async () => ({
   status: 'ok',
-  service: 'peru-exporta-backend',
-  timestamp: new Date().toISOString(),
-  version: '1.0.0'
+  service: 'Hidata — WhatsApp Sales ERP',
+  version: '2.0.0',
+  timestamp: new Date().toISOString()
 }))
 
-// Webhook principal — recibe mensajes de Evolution API
-// Los 3 números (joan, cristina, francisco) apuntan a esta misma URL
+// ============================================
+// RUTAS — WEBHOOK WhatsApp
+// ============================================
 app.post('/webhook', async (request, reply) => {
   return handleWebhook(request, reply, prisma)
 })
 
-// Webhook GET — para verificación inicial de Evolution API
-app.get('/webhook', async (request, reply) => {
-  return reply.send({ status: 'webhook activo', service: 'peru-exporta-backend' })
-})
+app.get('/webhook', async () => ({
+  status: 'webhook activo',
+  service: 'Hidata WhatsApp Sales ERP'
+}))
 
 // ============================================
-// RUTAS — SEMANA 2 (stubs listos para implementar)
+// RUTAS — API CRM (Semana 2)
 // ============================================
 
-// GET /leads — lista de leads filtrada por vendedor o admin
+// GET /leads — lista de leads
 app.get('/leads', async (request, reply) => {
-  // TODO Semana 2: implementar con auth JWT
-  return reply.send({ message: 'Disponible en Semana 2', leads: [] })
+  return getLeads(request, reply, prisma)
 })
 
-// PUT /leads/:id — actualizar estado
+// PUT /leads/:id — actualizar estado (mover Kanban)
 app.put('/leads/:id', async (request, reply) => {
-  return reply.send({ message: 'Disponible en Semana 2' })
+  return updateLead(request, reply, prisma)
+})
+
+// POST /leads/:id/mensaje — enviar mensaje manual
+app.post('/leads/:id/mensaje', async (request, reply) => {
+  return sendMensaje(request, reply, prisma)
+})
+
+// POST /leads/:id/accion — acciones del CRM
+app.post('/leads/:id/accion', async (request, reply) => {
+  return doAccion(request, reply, prisma)
 })
 
 // GET /reportes — métricas
 app.get('/reportes', async (request, reply) => {
-  return reply.send({ message: 'Disponible en Semana 2' })
+  return getReportes(request, reply, prisma)
 })
 
 // ============================================
-// ARRANCAR EL SERVIDOR
+// ARRANCAR SERVIDOR
 // ============================================
 const PORT = parseInt(process.env.PORT || '3000')
 const HOST = process.env.HOST || '0.0.0.0'
@@ -89,14 +104,13 @@ try {
   await app.listen({ port: PORT, host: HOST })
   console.log(`
 ╔════════════════════════════════════════╗
-║   Hidata - Whatsapp Sales Backend      ║
-║   Puerto: ${PORT}                      ║
+║   Hidata — WhatsApp Sales ERP v2.0     ║
+║   Puerto: ${PORT}                          ║
 ║   DB: PostgreSQL (Prisma)              ║
 ║   WhatsApp: Evolution API              ║
 ╚════════════════════════════════════════╝
   `)
 
-  // Verificar conexión a BD
   await prisma.$connect()
   console.log('✅ PostgreSQL conectado')
 
@@ -106,9 +120,7 @@ try {
   process.exit(1)
 }
 
-// Graceful shutdown
 process.on('SIGTERM', async () => {
-  console.log('Cerrando servidor...')
   await app.close()
   await prisma.$disconnect()
   process.exit(0)
