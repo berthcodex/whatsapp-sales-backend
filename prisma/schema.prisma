@@ -122,8 +122,11 @@ model Mensaje {
 model Flujo {
   id          String   @id @default(uuid())
   tenantId    String
-  nombre      String   // "bienvenida" | "reactivacion_1h" | "objecion_precio"
+  nombre      String
   descripcion String?
+  trigger     String?  // "lead_nuevo" | "revisando" | "asesor_a" | "asesor_b" | "reactivacion_1h" | "reactivacion_24h"
+  contenido   String?  // texto editable del mensaje
+  botones     Json?    // JSON con botones opcionales
   activo      Boolean  @default(true)
   creadoEn    DateTime @default(now())
   
