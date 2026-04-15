@@ -43,11 +43,6 @@ export async function enviarTexto(instancia, numero, mensaje) {
 // ============================================
 export async function enviarBotones(instancia, numero, titulo, botones, footer = 'Peru Exporta TV') {
   try {
-    const botonesFormateados = botones.map((btn, i) => ({
-      buttonId: btn.id || `btn_${i}`,
-      buttonText: { displayText: btn.texto }
-    }))
-
     const response = await fetch(
       `${EVOLUTION_URL}/message/sendButtons/${instancia}`,
       {
@@ -58,17 +53,24 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
         },
         body: JSON.stringify({
           number: numero,
-          buttonMessage: {
-            title: titulo,
-            buttons: botonesFormateados,
-            footerText: footer
+          buttons: botones.map((btn, i) => ({
+            type: 'reply',
+            reply: {
+              id: btn.id || `btn_${i}`,
+              title: btn.texto
+            }
+          })),
+          body: { text: titulo },
+          footer: { text: footer },
+          header: {
+            type: 'text',
+            text: 'Perú Exporta TV 🇵🇪'
           }
         })
       }
     )
 
     if (!response.ok) {
-      // Si botones no están disponibles, enviar como texto plano
       console.warn('[WhatsApp] Botones no disponibles, usando texto plano')
       const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
       return await enviarTexto(instancia, numero, textoAlternativo)
@@ -77,7 +79,6 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
     return await response.json()
   } catch (error) {
     console.error(`[WhatsApp] Error enviando botones a ${numero}:`, error.message)
-    // Fallback a texto plano
     const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
     return await enviarTexto(instancia, numero, textoAlternativo)
   }
