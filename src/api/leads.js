@@ -5,25 +5,17 @@
 import { enviarTexto } from '../whatsapp/sender.js'
 import { actualizarEstadoEnSheet } from '../sheets/mirror.js'
 
-// ============================================
-// GET /leads — lista de leads del tenant
-// Query params: ?vendedor=joan&estado=nuevo&limit=100
-// ============================================
 export async function getLeads(request, reply, prisma) {
   try {
     const { vendedor, estado, limit = 200 } = request.query
 
-    // Construir filtro dinámico
     const where = {}
+    where.tenantId = 'hidata'
 
-    // Por ahora tenant fijo — en Semana 5 viene del JWT
-    where.tenantId = 'peru-exporta-tenant-id'
-
-    // Filtrar por vendedor si se especifica
     if (vendedor) {
       const vendedorObj = await prisma.vendedor.findFirst({
         where: {
-          tenantId: 'peru-exporta-tenant-id',
+          tenantId: 'hidata',
           OR: [
             { nombre: { contains: vendedor, mode: 'insensitive' } },
             { instanciaEvolution: { contains: vendedor, mode: 'insensitive' } }
@@ -33,7 +25,6 @@ export async function getLeads(request, reply, prisma) {
       if (vendedorObj) where.vendedorId = vendedorObj.id
     }
 
-    // Filtrar por estado si se especifica
     if (estado) where.estado = estado
 
     const leads = await prisma.lead.findMany({
@@ -47,7 +38,6 @@ export async function getLeads(request, reply, prisma) {
       }
     })
 
-    // Formatear para el CRM — compatible con el formato que espera el frontend
     const leadsFormateados = leads.map(lead => ({
       id: lead.id,
       nombre: lead.nombre || 'Sin nombre',
@@ -62,7 +52,6 @@ export async function getLeads(request, reply, prisma) {
       primerMensaje: lead.primerMensaje || '',
       vendedor: lead.vendedor?.nombre || '',
       instancia: lead.vendedor?.instanciaEvolution || '',
-      // Compatibilidad con formato legacy del CRM
       fecha: lead.creadoEn,
       phone: lead.numero,
       fila: lead.id,
@@ -75,22 +64,16 @@ export async function getLeads(request, reply, prisma) {
   }
 }
 
-// ============================================
-// PUT /leads/:id — actualizar estado (mover Kanban)
-// Body: { estado: 'por_llamar' }
-// ============================================
 export async function updateLead(request, reply, prisma) {
   try {
     const { id } = request.params
     const { estado, prioridad, nombre, producto, resultado, fechaLlamada } = request.body
 
-    // Verificar que el lead existe
     const leadExistente = await prisma.lead.findUnique({ where: { id } })
     if (!leadExistente) {
       return reply.status(404).send({ error: 'Lead no encontrado' })
     }
 
-    // Construir datos a actualizar
     const data = { actualizadoEn: new Date() }
     if (estado)       data.estado = estado
     if (prioridad)    data.prioridad = prioridad
@@ -107,7 +90,6 @@ export async function updateLead(request, reply, prisma) {
       }
     })
 
-    // Actualizar espejo en Sheets (no bloquea la respuesta)
     if (estado && lead.vendedor?.instanciaEvolution) {
       actualizarEstadoEnSheet(
         lead.vendedor.instanciaEvolution,
@@ -123,10 +105,6 @@ export async function updateLead(request, reply, prisma) {
   }
 }
 
-// ============================================
-// POST /leads/:id/mensaje — enviar mensaje manual
-// Body: { contenido: 'Hola, ¿cómo estás?' }
-// ============================================
 export async function sendMensaje(request, reply, prisma) {
   try {
     const { id } = request.params
@@ -143,14 +121,12 @@ export async function sendMensaje(request, reply, prisma) {
 
     if (!lead) return reply.status(404).send({ error: 'Lead no encontrado' })
 
-    // Enviar mensaje via Evolution API
     await enviarTexto(
       lead.vendedor.instanciaEvolution,
       lead.numero,
       contenido
     )
 
-    // Guardar en historial
     await prisma.mensaje.create({
       data: {
         leadId: lead.id,
@@ -168,10 +144,6 @@ export async function sendMensaje(request, reply, prisma) {
   }
 }
 
-// ============================================
-// POST /leads/:id/accion — acciones del CRM
-// Body: { accion: 'enviar_material' | 'no_contesto' | 'agendar' | 'cerrar' }
-// ============================================
 export async function doAccion(request, reply, prisma) {
   try {
     const { id } = request.params
@@ -184,21 +156,14 @@ export async function doAccion(request, reply, prisma) {
 
     if (!lead) return reply.status(404).send({ error: 'Lead no encontrado' })
 
-    const instancia = lead.vendedor?.instanciaEvolution
-
     switch (accion) {
-
       case 'enviar_material': {
-        // Actualizar estado
         await prisma.lead.update({
           where: { id },
           data: { estado: 'mat_enviado', actualizadoEn: new Date() }
         })
-        // El mensaje de material se envía desde el panel manual
-        // En Semana 3 esto se automatiza con los flujos
         return reply.send({ ok: true, estado: 'mat_enviado' })
       }
-
       case 'no_contesto': {
         await prisma.lead.update({
           where: { id },
@@ -206,7 +171,6 @@ export async function doAccion(request, reply, prisma) {
         })
         return reply.send({ ok: true, estado: 'no_contesto' })
       }
-
       case 'agendar': {
         await prisma.lead.update({
           where: { id },
@@ -218,7 +182,6 @@ export async function doAccion(request, reply, prisma) {
         })
         return reply.send({ ok: true, estado: 'agendado' })
       }
-
       case 'cerrar': {
         await prisma.lead.update({
           where: { id },
@@ -226,7 +189,6 @@ export async function doAccion(request, reply, prisma) {
         })
         return reply.send({ ok: true, estado: 'cerrado' })
       }
-
       default:
         return reply.status(400).send({ error: `Acción desconocida: ${accion}` })
     }
@@ -236,13 +198,10 @@ export async function doAccion(request, reply, prisma) {
   }
 }
 
-// ============================================
-// GET /reportes — métricas del tenant
-// ============================================
 export async function getReportes(request, reply, prisma) {
   try {
     const { vendedor } = request.query
-    const tenantId = 'peru-exporta-tenant-id'
+    const tenantId = 'hidata'
 
     const where = { tenantId }
     if (vendedor) {
@@ -261,14 +220,7 @@ export async function getReportes(request, reply, prisma) {
 
     const conversion = total > 0 ? Math.round((cerrados / total) * 100) : 0
 
-    return reply.send({
-      total,
-      cerrados,
-      porLlamar,
-      nuevos,
-      conversion,
-      periodo: 'todos'
-    })
+    return reply.send({ total, cerrados, porLlamar, nuevos, conversion, periodo: 'todos' })
   } catch (error) {
     console.error('[API/leads] Error en getReportes:', error)
     return reply.status(500).send({ error: 'Error al obtener reportes' })
