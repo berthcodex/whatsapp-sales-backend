@@ -105,58 +105,55 @@ async function procesarMensaje({ prisma, instancia, numero, texto, tieneImagen, 
   await manejarMensajeAdicional({ prisma, instancia, numero, texto, leadExistente })
 }
 
-async function manejarLeadNuevo({ prisma, instancia, numero, texto, tenantId, vendedorId, vendedor }) {
-  console.log(`[Webhook] Lead nuevo: ${numero} en ${instancia}`)
-
-  const clasificacion = await clasificarLead(texto)
-
-  const lead = await prisma.lead.create({
+async function manejarMensajeAdicional({ prisma, instancia, numero, texto, leadExistente }) {
+  // Acumular mensajes
+  const todosLosMensajes = (leadExistente.todosLosMensajes || '') + ' | ' + texto
+  
+  await prisma.lead.update({
+    where: { id: leadExistente.id },
     data: {
-      tenantId,
-      vendedorId,
-      numero,
-      nombre: clasificacion.nombre,
-      producto: clasificacion.producto,
-      tipo: clasificacion.tipo,
-      tipoPreciso: clasificacion.tipoPreciso,
-      scoreTotal: clasificacion.scoreTotal,
-      scoreB: clasificacion.scoreB,
-      scoreA: clasificacion.scoreA,
-      clasificadoPorIA: clasificacion.usóIA,
-      prioridad: clasificacion.prioridad,
-      estado: 'nuevo',
-      primerMensaje: texto,
-      todosLosMensajes: texto,
+      todosLosMensajes,
       ultimoTimestamp: new Date()
     }
   })
 
   await prisma.mensaje.create({
     data: {
-      leadId: lead.id,
-      tenantId,
+      leadId: leadExistente.id,
+      tenantId: leadExistente.tenantId,
       direccion: 'entrante',
       contenido: texto,
       tipo: 'texto'
     }
   })
 
-  await escribirLeadEnSheet(instancia, lead, clasificacion)
-
-  // Leer bienvenida de BD
-  const msgBienvenida = await getFlujo(prisma, tenantId, 'lead_nuevo') ||
-    'Hola 🙋 te saluda Perú Exporta TV 🇵🇪\n\nNo necesitas tener producto propio para exportar — necesitas saber cómo.\n\n¿Cómo te llamas y qué producto o rubro quieres exportar? 👇'
-
-  await enviarTexto(instancia, numero, msgBienvenida)
-  await sleep(2000)
-
-  await enviarBotones(instancia, numero, '¿En qué etapa estás ahora mismo?', BOTONES_ETAPA)
-
-  if (clasificacion.tipo === 'B' && clasificacion.prioridad === 'URGENTE') {
-    await notificarVendedor(instancia, vendedor, lead, clasificacion)
+  // Reclasificar si aún no tiene clasificación firme
+  if (leadExistente.scoreTotal < 8) {
+    const clasificacion = await clasificarLead(todosLosMensajes)
+    
+    if (clasificacion.scoreTotal >= 8 || clasificacion.usóIA) {
+      await prisma.lead.update({
+        where: { id: leadExistente.id },
+        data: {
+          tipo: clasificacion.tipo,
+          tipoPreciso: clasificacion.tipoPreciso,
+          scoreTotal: clasificacion.scoreTotal,
+          scoreB: clasificacion.scoreB,
+          scoreA: clasificacion.scoreA,
+          clasificadoPorIA: clasificacion.usóIA,
+          prioridad: clasificacion.prioridad,
+          nombre: clasificacion.nombre || leadExistente.nombre,
+          producto: clasificacion.producto || leadExistente.producto,
+        }
+      })
+      console.log(`[Webhook] Lead ${numero} reclasificado: ${clasificacion.tipoPreciso} | Score: ${clasificacion.scoreTotal}`)
+    }
   }
 
-  console.log(`[Webhook] Lead nuevo procesado: ${clasificacion.nombre || numero} | ${clasificacion.tipoPreciso} | Score: ${clasificacion.scoreTotal}`)
+  // Si el lead está en estado nuevo, re-enviar botones
+  if (leadExistente.estado === 'nuevo') {
+    await enviarBotones(instancia, numero, '¿En qué etapa estás ahora mismo?', BOTONES_ETAPA)
+  }
 }
 
 async function manejarRespuestaBoton({ prisma, instancia, numero, texto, leadExistente, tenantId }) {
