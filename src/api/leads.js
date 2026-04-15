@@ -12,18 +12,22 @@ export async function getLeads(request, reply, prisma) {
     const where = {}
     where.tenantId = 'hidata'
 
-    if (vendedor) {
-      const vendedorObj = await prisma.vendedor.findFirst({
-        where: {
-          tenantId: 'hidata',
-          OR: [
-            { nombre: { contains: vendedor, mode: 'insensitive' } },
-            { instanciaEvolution: { contains: vendedor, mode: 'insensitive' } }
-          ]
-        }
-      })
-      if (vendedorObj) where.vendedorId = vendedorObj.id
+  if (vendedor) {
+  const vendedorObj = await prisma.vendedor.findFirst({
+    where: {
+      tenantId: 'hidata',
+      OR: [
+        { nombre: { contains: vendedor, mode: 'insensitive' } },
+        { instanciaEvolution: { contains: vendedor, mode: 'insensitive' } }
+      ]
     }
+  })
+  if (vendedorObj) {
+    where.vendedorId = vendedorObj.id
+  } else {
+    return reply.send([])
+  }
+}
 
     if (estado) where.estado = estado
 
