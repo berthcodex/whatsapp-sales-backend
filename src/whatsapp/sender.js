@@ -35,23 +35,15 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
   try {
     const payload = {
       number: numero,
-      options: { delay: 1200 },
-      buttonsMessage: {
-        text: titulo,
-        footer: footer,
-        buttons: botones.map((btn, i) => ({
-          buttonId: btn.id || `btn_${i}`,
-          buttonText: { displayText: btn.texto },
-          type: 1
-        })),
-        headerType: 1
-      }
+      name: titulo,
+      values: botones.map(btn => btn.texto),
+      selectableCount: 1
     }
 
-    console.log('[WhatsApp] Enviando buttonsMessage payload:', JSON.stringify(payload))
+    console.log('[WhatsApp] Enviando poll payload:', JSON.stringify(payload))
 
     const response = await fetch(
-      `${EVOLUTION_URL}/message/sendMessage/${instancia}`,
+      `${EVOLUTION_URL}/message/sendPoll/${instancia}`,
       {
         method: 'POST',
         headers: {
@@ -63,17 +55,17 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
     )
 
     const responseText = await response.text()
-    console.log('[WhatsApp] Respuesta botones:', response.status, responseText)
+    console.log('[WhatsApp] Respuesta poll:', response.status, responseText)
 
     if (!response.ok) {
-      console.warn('[WhatsApp] Botones fallaron, usando texto plano')
+      console.warn('[WhatsApp] Poll falló, usando texto plano')
       const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
       return await enviarTexto(instancia, numero, textoAlternativo)
     }
 
     return JSON.parse(responseText)
   } catch (error) {
-    console.error(`[WhatsApp] Error enviando botones a ${numero}:`, error.message)
+    console.error(`[WhatsApp] Error enviando poll a ${numero}:`, error.message)
     const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
     return await enviarTexto(instancia, numero, textoAlternativo)
   }
