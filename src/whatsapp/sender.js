@@ -1,13 +1,7 @@
 // src/whatsapp/sender.js
-// Envía mensajes a WhatsApp vía Evolution API
-// Soporta texto simple y botones interactivos
-
 const EVOLUTION_URL = process.env.EVOLUTION_URL || 'https://evolution-api-production-f1e7.up.railway.app'
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY
 
-// ============================================
-// Enviar mensaje de texto simple
-// ============================================
 export async function enviarTexto(instancia, numero, mensaje) {
   try {
     const response = await fetch(
@@ -37,12 +31,27 @@ export async function enviarTexto(instancia, numero, mensaje) {
   }
 }
 
-// ============================================
-// Enviar botones interactivos (máx 3 botones)
-// El lead toca un botón → llega como texto al webhook
-// ============================================
 export async function enviarBotones(instancia, numero, titulo, botones, footer = 'Peru Exporta TV') {
   try {
+    const payload = {
+      number: numero,
+      buttons: botones.map((btn, i) => ({
+        type: 'reply',
+        reply: {
+          id: btn.id || `btn_${i}`,
+          title: btn.texto
+        }
+      })),
+      body: { text: titulo },
+      footer: { text: footer },
+      header: {
+        type: 'text',
+        text: 'Perú Exporta TV'
+      }
+    }
+
+    console.log('[WhatsApp] Enviando botones payload:', JSON.stringify(payload))
+
     const response = await fetch(
       `${EVOLUTION_URL}/message/sendButtons/${instancia}`,
       {
@@ -51,32 +60,20 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
           'Content-Type': 'application/json',
           'apikey': EVOLUTION_API_KEY
         },
-        body: JSON.stringify({
-          number: numero,
-          buttons: botones.map((btn, i) => ({
-            type: 'reply',
-            reply: {
-              id: btn.id || `btn_${i}`,
-              title: btn.texto
-            }
-          })),
-          body: { text: titulo },
-          footer: { text: footer },
-          header: {
-            type: 'text',
-            text: 'Perú Exporta TV 🇵🇪'
-          }
-        })
+        body: JSON.stringify(payload)
       }
     )
 
+    const responseText = await response.text()
+    console.log('[WhatsApp] Respuesta botones:', response.status, responseText)
+
     if (!response.ok) {
-      console.warn('[WhatsApp] Botones no disponibles, usando texto plano')
+      console.warn('[WhatsApp] Botones fallaron, usando texto plano')
       const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
       return await enviarTexto(instancia, numero, textoAlternativo)
     }
 
-    return await response.json()
+    return JSON.parse(responseText)
   } catch (error) {
     console.error(`[WhatsApp] Error enviando botones a ${numero}:`, error.message)
     const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
@@ -84,10 +81,6 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
   }
 }
 
-// ============================================
-// Enviar lista de opciones (máx 10 items)
-// Ideal para seleccionar productos
-// ============================================
 export async function enviarLista(instancia, numero, titulo, descripcion, opciones) {
   try {
     const response = await fetch(
@@ -119,7 +112,6 @@ export async function enviarLista(instancia, numero, titulo, descripcion, opcion
     )
 
     if (!response.ok) {
-      // Fallback a texto plano numerado
       const textoAlternativo = titulo + '\n\n' + opciones.map((op, i) => `${i+1}. ${op.texto}`).join('\n')
       return await enviarTexto(instancia, numero, textoAlternativo)
     }
