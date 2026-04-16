@@ -35,20 +35,23 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
   try {
     const payload = {
       number: numero,
-      title: titulo,
-      description: titulo,
-      footer: footer,
-      buttons: botones.map((btn, i) => ({
-        buttonId: btn.id || `btn_${i}`,
-        buttonText: { displayText: btn.texto },
-        type: 'reply'
-      }))
+      options: { delay: 1200 },
+      buttonsMessage: {
+        text: titulo,
+        footer: footer,
+        buttons: botones.map((btn, i) => ({
+          buttonId: btn.id || `btn_${i}`,
+          buttonText: { displayText: btn.texto },
+          type: 1
+        })),
+        headerType: 1
+      }
     }
 
-    console.log('[WhatsApp] Enviando botones payload:', JSON.stringify(payload))
+    console.log('[WhatsApp] Enviando buttonsMessage payload:', JSON.stringify(payload))
 
     const response = await fetch(
-      `${EVOLUTION_URL}/message/sendButtons/${instancia}`,
+      `${EVOLUTION_URL}/message/sendMessage/${instancia}`,
       {
         method: 'POST',
         headers: {
