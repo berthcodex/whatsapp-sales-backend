@@ -36,13 +36,12 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
     const payload = {
       number: numero,
       title: titulo,
+      description: titulo,
       footer: footer,
       buttons: botones.map((btn, i) => ({
-        type: 'reply',
-        reply: {
-          id: btn.id || `btn_${i}`,
-          title: btn.texto
-        }
+        buttonId: btn.id || `btn_${i}`,
+        buttonText: { displayText: btn.texto },
+        type: 1
       }))
     }
 
