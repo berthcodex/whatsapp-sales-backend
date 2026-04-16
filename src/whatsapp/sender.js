@@ -41,7 +41,7 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
       buttons: botones.map((btn, i) => ({
         buttonId: btn.id || `btn_${i}`,
         buttonText: { displayText: btn.texto },
-        type: 1
+        type: 'reply'
       }))
     }
 
