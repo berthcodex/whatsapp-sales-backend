@@ -35,19 +35,15 @@ export async function enviarBotones(instancia, numero, titulo, botones, footer =
   try {
     const payload = {
       number: numero,
+      title: titulo,
+      footer: footer,
       buttons: botones.map((btn, i) => ({
         type: 'reply',
         reply: {
           id: btn.id || `btn_${i}`,
           title: btn.texto
         }
-      })),
-      body: { text: titulo },
-      footer: { text: footer },
-      header: {
-        type: 'text',
-        text: 'Perú Exporta TV'
-      }
+      }))
     }
 
     console.log('[WhatsApp] Enviando botones payload:', JSON.stringify(payload))
