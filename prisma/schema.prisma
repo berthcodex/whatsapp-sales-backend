@@ -1,14 +1,43 @@
 // prisma/schema.prisma
-// Bot Peru Exporta — Schema completo
+// Hidata — Schema Sprint 1
 // Multitenant desde el día 1: tenant_id en todas las tablas
+// Actualizado: 20 Abril 2026
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+/// Los 7 estados del motor conversacional.
+/// Son un contrato cerrado — no se pueden agregar sin migración.
+enum EstadoBot {
+  BIENVENIDA
+  PRODUCTO
+  EXPERIENCIA
+  PRESENTACION
+  OBJECION
+  URGENCIA
+  HANDOFF
+}
+
+enum DireccionMensaje {
+  ENTRANTE
+  SALIENTE
+}
+
+enum RolVendedor {
+  ADMIN
+  VENDEDOR
+  SUPERVISOR
 }
 
 // ============================================
@@ -16,84 +45,99 @@ datasource db {
 // Peru Exporta es el primer tenant
 // ============================================
 model Tenant {
-  id          String   @id @default(uuid())
-  nombre      String
-  plan        String   @default("free") // free | pro | enterprise
-  activo      Boolean  @default(true)
-  creadoEn    DateTime @default(now())
-  
-  vendedores  Vendedor[]
-  leads       Lead[]
-  mensajes    Mensaje[]
-  flujos      Flujo[]
-  
+  id         String   @id @default(uuid())
+  nombre     String
+  slug       String   @unique              // "peru-exporta"
+  plan       String   @default("starter")  // starter | pro | enterprise
+  activo     Boolean  @default(true)
+  creadoEn   DateTime @default(now())
+  updatedEn  DateTime @updatedAt
+
+  vendedores Vendedor[]
+  leads      Lead[]
+  mensajes   Mensaje[]
+  flujos     Flujo[]
+  botConfigs BotConfig[]
+
   @@map("tenants")
 }
 
 // ============================================
 // VENDEDOR — Joan, Cristina, Francisco
-// Cada uno tiene su instancia de Evolution API
+// Cada uno tiene su número WhatsApp propio
 // ============================================
 model Vendedor {
-  id                  String   @id @default(uuid())
-  tenantId            String
-  nombre              String
-  email               String?
-  passwordHash        String?
-  rol                 String   @default("vendedor") // admin | vendedor
-  instanciaEvolution  String   @unique // "peru-exporta-joan"
-  activo              Boolean  @default(true)
-  creadoEn            DateTime @default(now())
-  
-  tenant    Tenant  @relation(fields: [tenantId], references: [id])
-  leads     Lead[]
-  
+  id                 String      @id @default(uuid())
+  tenantId           String
+  nombre             String
+  email              String?
+  passwordHash       String?
+  rol                RolVendedor @default(VENDEDOR)
+  whatsappNumber     String      @unique  // "+51XXXXXXXXX" — routing de leads
+  instanciaEvolution String?     @unique  // "peru-exporta-joan"
+  activo             Boolean     @default(true)
+  creadoEn           DateTime    @default(now())
+  updatedEn          DateTime    @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  leads    Lead[]
+  mensajes Mensaje[]
+
+  @@index([tenantId])
+  @@index([whatsappNumber])
   @@map("vendedores")
 }
 
 // ============================================
 // LEAD — El corazón del sistema
-// Cada lead pertenece a un tenant y un vendedor
+// 1 teléfono = 1 lead por tenant (deduplicación global)
 // ============================================
 model Lead {
-  id          String   @id @default(uuid())
-  tenantId    String
-  vendedorId  String
-  
+  id         String    @id @default(uuid())
+  tenantId   String
+  vendedorId String?
+
   // Datos del lead
-  nombre      String?
-  numero      String   // número WhatsApp sin @s.whatsapp.net
-  producto    String?
-  region      String?
-  
+  nombre   String?
+  numero   String
+  producto String?
+  region   String?
+
   // Clasificación
-  tipo        String   @default("A") // A | B
-  tipoPreciso String?  // "Tipo A — formación" | "Tipo B — broker"
-  scoreTotal  Int      @default(0)  // scoring ponderado
-  scoreB      Int      @default(0)  // puntos Tipo B acumulados
-  scoreA      Int      @default(0)  // puntos Tipo A acumulados
-  clasificadoPorIA Boolean @default(false) // si usó Groq/Llama
-  
+  tipo             String  @default("A")
+  tipoPreciso      String?
+  scoreTotal       Int     @default(0)
+  scoreB           Int     @default(0)
+  scoreA           Int     @default(0)
+  clasificadoPorIA Boolean @default(false)
+
   // Pipeline
-  prioridad   String   @default("MEDIA") // URGENTE | ALTA | MEDIA
-  estado      String   @default("nuevo") // nuevo | por_llamar | no_contesto | agendado | mat_enviado | cerrado | frio
-  
+  prioridad String @default("MEDIA")
+
+  // Motor conversacional — 7 estados
+  estadoBot         EstadoBot  @default(BIENVENIDA)
+  estadoBotAnterior EstadoBot?
+  handoffEn         DateTime?
+  handoffPor        String?
+
   // Tracking
-  primerMensaje   String?  // texto del primer mensaje
-  todosLosMensajes String? // mensajes brutales concatenados
-  ultimoTimestamp  DateTime?
-  
+  primerMensaje   String?
+  ultimoTimestamp DateTime?
+
   // Fechas
-  creadoEn    DateTime @default(now())
-  actualizadoEn DateTime @updatedAt
+  creadoEn      DateTime  @default(now())
+  actualizadoEn DateTime  @updatedAt
   fechaLlamada  DateTime?
-  resultado     String?  // resultado de la llamada
-  
-  tenant    Tenant   @relation(fields: [tenantId], references: [id])
-  vendedor  Vendedor @relation(fields: [vendedorId], references: [id])
-  mensajes  Mensaje[]
-  
-  @@unique([numero, vendedorId]) // un lead por número por vendedor
+  resultado     String?
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vendedor Vendedor? @relation(fields: [vendedorId], references: [id])
+  mensajes Mensaje[]
+
+  @@unique([numero, tenantId])
+  @@index([tenantId])
+  @@index([vendedorId])
+  @@index([estadoBot])
   @@map("leads")
 }
 
@@ -101,92 +145,109 @@ model Lead {
 // MENSAJE — Historial completo de conversación
 // ============================================
 model Mensaje {
-  id         String   @id @default(uuid())
+  id         String           @id @default(uuid())
   leadId     String
   tenantId   String
-  direccion  String   // "entrante" | "saliente"
+  vendedorId String?
+  direccion  DireccionMensaje
   contenido  String
-  tipo       String   @default("texto") // texto | imagen | audio | boton
-  enviadoEn  DateTime @default(now())
-  
-  lead    Lead   @relation(fields: [leadId], references: [id])
-  tenant  Tenant @relation(fields: [tenantId], references: [id])
-  
+  estadoBot  EstadoBot?
+  tipo       String           @default("texto")
+  metadata   Json?
+  enviadoEn  DateTime         @default(now())
+
+  lead     Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vendedor Vendedor? @relation(fields: [vendedorId], references: [id])
+
+  @@index([leadId])
+  @@index([tenantId])
+  @@index([enviadoEn])
   @@map("mensajes")
 }
 
 // ============================================
-// FLUJO — Los flujos de mensajes editables
-// Cristina y Francisco pueden editarlos desde el CRM
+// BOT CONFIG — Los 7 mensajes configurables por tenant
+// ============================================
+model BotConfig {
+  id       String  @id @default(uuid())
+  tenantId String
+  nombre   String
+  activo   Boolean @default(false)
+
+  nombreEmpresa  String
+  nombreProducto String
+
+  msgBienvenida   String @db.Text
+  msgProducto     String @db.Text
+  msgExperiencia  String @db.Text
+  msgPresentacion String @db.Text
+  msgObjecion     String @db.Text
+  msgUrgencia     String @db.Text
+  msgHandoff      String @db.Text
+
+  timeoutInactividad Int      @default(1440)
+  maxReintentos      Int      @default(2)
+  keywordsHandoff    String[] @default(["hablar con asesor", "quiero hablar", "precio", "descuento"])
+
+  creadoEn  DateTime @default(now())
+  updatedEn DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("bot_config")
+}
+
+// ============================================
+// FLUJO / PASO / TRIGGER — sin cambios Sprint 1
 // ============================================
 model Flujo {
   id          String   @id @default(uuid())
   tenantId    String
   nombre      String
   descripcion String?
-  trigger     String?  // "lead_nuevo" | "revisando" | "asesor_a" | "asesor_b" | "reactivacion_1h" | "reactivacion_24h"
-  contenido   String?  // texto editable del mensaje
-  botones     Json?    // JSON con botones opcionales
+  trigger     String?
+  contenido   String?
+  botones     Json?
   activo      Boolean  @default(true)
   creadoEn    DateTime @default(now())
-  
-  tenant  Tenant @relation(fields: [tenantId], references: [id])
-  pasos   Paso[]
-  
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pasos  Paso[]
+
   @@map("flujos")
 }
 
-// ============================================
-// PASO — Cada mensaje dentro de un flujo
-// ============================================
 model Paso {
-  id          String   @id @default(uuid())
-  flujoId     String
-  orden       Int      // 1, 2, 3...
-  tipo        String   // "mensaje" | "pregunta_botones" | "condicion" | "notificar_vendedor"
-  
-  // Contenido editable por Cristina
-  contenido   String?  // texto del mensaje
-  botones     String?  // JSON: [{"id":"tipo_b","texto":"Ya tengo producto"}]
-  
-  // Condiciones
-  condicion   String?  // JSON: {"campo":"tipo","valor":"B","siguientePasoId":"xxx"}
-  
-  // Timing
-  esperarRespuesta Boolean @default(false)
-  siguientePasoId  String? // null = fin del flujo
-  
-  flujo    Flujo     @relation(fields: [flujoId], references: [id])
+  id               String   @id @default(uuid())
+  flujoId          String
+  orden            Int
+  tipo             String
+  contenido        String?
+  botones          String?
+  condicion        String?
+  esperarRespuesta Boolean  @default(false)
+  siguientePasoId  String?
+
+  flujo    Flujo     @relation(fields: [flujoId], references: [id], onDelete: Cascade)
   triggers Trigger[]
-  
+
   @@map("pasos")
 }
 
-// ============================================
-// TRIGGER — Cuándo se activa cada paso
-// Los 3 tipos: respuesta, tiempo, evento
-// ============================================
 model Trigger {
-  id              String   @id @default(uuid())
-  pasoId          String
-  tipo            String   // "tiempo" | "keyword" | "evento" | "boton"
-  
-  // Trigger de tiempo
-  minutosEspera   Int?     // 60 = 1 hora, 1440 = 24 horas
-  
-  // Trigger de keyword
-  keywords        String?  // JSON: ["caro","no tengo","precio"]
-  
-  // Trigger de evento
-  evento          String?  // "vendedor_marco_no_contesto" | "imagen_recibida" | "vendedor_marco_cerrado"
-  
-  // Trigger de botón
-  botonId         String?  // "tipo_a" | "tipo_b"
-  
-  siguientePasoId String?
-  accionAlternativa String? // qué pasa si NO se activa
-  
-  paso  Paso @relation(fields: [pasoId], references: [id])
-  
+  id                String  @id @default(uuid())
+  pasoId            String
+  tipo              String
+  minutosEspera     Int?
+  keywords          String?
+  evento            String?
+  botonId           String?
+  siguientePasoId   String?
+  accionAlternativa String?
+
+  paso Paso @relation(fields: [pasoId], references: [id], onDelete: Cascade)
+
   @@map("triggers")
 }
