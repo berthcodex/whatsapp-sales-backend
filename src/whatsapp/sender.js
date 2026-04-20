@@ -1,6 +1,6 @@
 // src/whatsapp/sender.js
-const EVOLUTION_URL = process.env.EVOLUTION_URL || 'https://evolution-api-production-f1e7.up.railway.app'
-const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY
+const EVOLUTION_URL = process.env.EVOLUTION_URL || 'https://evolution-api-production-717e.up.railway.app'
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || process.env.EVOLUTION_API_KEY_GLOBAL
 
 export async function enviarTexto(instancia, numero, mensaje) {
   try {
@@ -12,18 +12,13 @@ export async function enviarTexto(instancia, numero, mensaje) {
           'Content-Type': 'application/json',
           'apikey': EVOLUTION_API_KEY
         },
-        body: JSON.stringify({
-          number: numero,
-          text: mensaje
-        })
+        body: JSON.stringify({ number: numero, text: mensaje })
       }
     )
-
     if (!response.ok) {
       const error = await response.text()
       throw new Error(`Evolution API error ${response.status}: ${error}`)
     }
-
     return await response.json()
   } catch (error) {
     console.error(`[WhatsApp] Error enviando texto a ${numero}:`, error.message)
@@ -31,85 +26,24 @@ export async function enviarTexto(instancia, numero, mensaje) {
   }
 }
 
-export async function enviarBotones(instancia, numero, titulo, botones, footer = 'Peru Exporta TV') {
-  try {
-    const payload = {
-      number: numero,
-      name: titulo,
-      values: botones.map(btn => btn.texto),
-      selectableCount: 1
-    }
+export async function enviarBotones(instancia, numero, titulo, botones) {
+  // Los polls y botones interactivos están bloqueados por Meta para conexiones
+  // no oficiales (Baileys). Usamos texto numerado que funciona siempre.
+  const textoNumerado =
+    titulo + '\n\n' +
+    botones.map((b, i) => `${i + 1}️⃣ ${b.texto.replace(/^\d️⃣\s*/, '')}`).join('\n') +
+    '\n\nResponde con el número de tu opción 👇'
 
-    console.log('[WhatsApp] Enviando poll payload:', JSON.stringify(payload))
-
-    const response = await fetch(
-      `${EVOLUTION_URL}/message/sendPoll/${instancia}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': EVOLUTION_API_KEY
-        },
-        body: JSON.stringify(payload)
-      }
-    )
-
-    const responseText = await response.text()
-    console.log('[WhatsApp] Respuesta poll:', response.status, responseText)
-
-    if (!response.ok) {
-      console.warn('[WhatsApp] Poll falló, usando texto plano')
-      const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
-      return await enviarTexto(instancia, numero, textoAlternativo)
-    }
-
-    return JSON.parse(responseText)
-  } catch (error) {
-    console.error(`[WhatsApp] Error enviando poll a ${numero}:`, error.message)
-    const textoAlternativo = titulo + '\n\n' + botones.map(b => `• ${b.texto}`).join('\n')
-    return await enviarTexto(instancia, numero, textoAlternativo)
-  }
+  return await enviarTexto(instancia, numero, textoNumerado)
 }
 
 export async function enviarLista(instancia, numero, titulo, descripcion, opciones) {
-  try {
-    const response = await fetch(
-      `${EVOLUTION_URL}/message/sendList/${instancia}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': EVOLUTION_API_KEY
-        },
-        body: JSON.stringify({
-          number: numero,
-          listMessage: {
-            title: titulo,
-            description: descripcion,
-            buttonText: 'Ver opciones',
-            footerText: 'Peru Exporta TV',
-            sections: [{
-              title: 'Selecciona una opción',
-              rows: opciones.map((op, i) => ({
-                rowId: op.id || `op_${i}`,
-                title: op.texto,
-                description: op.descripcion || ''
-              }))
-            }]
-          }
-        })
-      }
-    )
+  // Igual que botones — texto numerado es la solución correcta con Baileys
+  const textoNumerado =
+    titulo + '\n\n' +
+    (descripcion ? descripcion + '\n\n' : '') +
+    opciones.map((op, i) => `${i + 1}. ${op.texto}`).join('\n') +
+    '\n\nResponde con el número 👇'
 
-    if (!response.ok) {
-      const textoAlternativo = titulo + '\n\n' + opciones.map((op, i) => `${i+1}. ${op.texto}`).join('\n')
-      return await enviarTexto(instancia, numero, textoAlternativo)
-    }
-
-    return await response.json()
-  } catch (error) {
-    console.error(`[WhatsApp] Error enviando lista a ${numero}:`, error.message)
-    const textoAlternativo = titulo + '\n\n' + opciones.map((op, i) => `${i+1}. ${op.texto}`).join('\n')
-    return await enviarTexto(instancia, numero, textoAlternativo)
-  }
+  return await enviarTexto(instancia, numero, textoNumerado)
 }
