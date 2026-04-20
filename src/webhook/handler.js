@@ -3,11 +3,33 @@ import { clasificarLead } from './classifier.js'
 import { enviarTexto, enviarBotones } from '../whatsapp/sender.js'
 import { escribirLeadEnSheet } from '../sheets/mirror.js'
 
-const BOTONES_ETAPA = [
-  { id: 'tipo_a_inicio', texto: '🌱 Estoy empezando desde cero' },
-  { id: 'tipo_b_producto', texto: '📦 Ya tengo producto o negocio' },
-  { id: 'tipo_b_vende', texto: '🚀 Ya vendo, quiero exportar' }
+// ─── Deduplicación de mensajes ────────────────────────────────────────────────
+// Evita procesar el mismo mensaje dos veces si Evolution API dispara el webhook
+// múltiples veces (comportamiento conocido con v2.3.7)
+const mensajesProcesados = new Set()
+
+function yaFueProcesado(messageId) {
+  if (!messageId) return false
+  if (mensajesProcesados.has(messageId)) return true
+  mensajesProcesados.add(messageId)
+  // Limpiar cache cada 1000 mensajes para no acumular memoria
+  if (mensajesProcesados.size > 1000) mensajesProcesados.clear()
+  return false
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+const OPCIONES_ETAPA = [
+  { id: 'tipo_a_inicio',   texto: '1️⃣ Estoy empezando desde cero' },
+  { id: 'tipo_b_producto', texto: '2️⃣ Ya tengo producto o negocio' },
+  { id: 'tipo_b_vende',    texto: '3️⃣ Ya vendo, quiero exportar' }
 ]
+
+const MENSAJE_ETAPA =
+  '¿En qué etapa estás ahora mismo?\n\n' +
+  '1️⃣ Estoy empezando desde cero\n' +
+  '2️⃣ Ya tengo producto o negocio\n' +
+  '3️⃣ Ya vendo, quiero exportar\n\n' +
+  'Responde con el número de tu opción 👇'
 
 async function getFlujo(prisma, tenantId, trigger) {
   try {
@@ -38,14 +60,23 @@ export async function handleWebhook(request, reply, prisma) {
     const msg = body.data
     const instancia = body.instance
 
+    // Ignorar mensajes propios del bot
     if (msg.key?.fromMe) {
       return reply.send({ status: 'ignored', reason: 'own_message' })
     }
 
+    // Ignorar grupos
     const numero = msg.key?.remoteJid?.replace('@s.whatsapp.net', '')
     if (!numero || numero.includes('@g.us')) {
       return reply.send({ status: 'ignored', reason: 'no_number_or_group' })
     }
+
+    // ── DEDUPLICACIÓN ──────────────────────────────────────────────────────────
+    const messageId = msg.key?.id
+    if (yaFueProcesado(messageId)) {
+      return reply.send({ status: 'ignored', reason: 'duplicate_message' })
+    }
+    // ──────────────────────────────────────────────────────────────────────────
 
     const texto = (
       msg.message?.conversation ||
@@ -60,6 +91,7 @@ export async function handleWebhook(request, reply, prisma) {
       msg.message?.documentMessage
     )
 
+    // Responder inmediatamente a Evolution API para evitar reintentos
     reply.send({ status: 'received' })
 
     procesarMensaje({ prisma, instancia, numero, texto, tieneImagen, msg })
@@ -74,7 +106,7 @@ export async function handleWebhook(request, reply, prisma) {
 async function procesarMensaje({ prisma, instancia, numero, texto, tieneImagen, msg }) {
   const vendedor = await getVendedorPorInstancia(prisma, instancia)
   if (!vendedor) {
-    console.error(`[Webhook] Instancia no reconocida: ${instancia}`)
+    console.log(`[Webhook] Instancia no reconocida: ${instancia}`)
     return
   }
 
@@ -94,8 +126,8 @@ async function procesarMensaje({ prisma, instancia, numero, texto, tieneImagen, 
     return
   }
 
-  if (esBtnCalificacion(texto)) {
-    await manejarRespuestaBoton({ prisma, instancia, numero, texto, leadExistente, tenantId })
+  if (esRespuestaEtapa(texto)) {
+    await manejarRespuestaEtapa({ prisma, instancia, numero, texto, leadExistente, tenantId })
     return
   }
 
@@ -112,42 +144,52 @@ async function manejarLeadNuevo({ prisma, instancia, numero, texto, tenantId, ve
       tenantId,
       vendedorId,
       numero,
-      nombre: clasificacion.nombre,
-      producto: clasificacion.producto,
-      tipo: clasificacion.tipo,
-      tipoPreciso: clasificacion.tipoPreciso,
-      scoreTotal: clasificacion.scoreTotal,
-      scoreB: clasificacion.scoreB,
-      scoreA: clasificacion.scoreA,
+      nombre:           clasificacion.nombre,
+      producto:         clasificacion.producto,
+      tipo:             clasificacion.tipo,
+      tipoPreciso:      clasificacion.tipoPreciso,
+      scoreTotal:       clasificacion.scoreTotal,
+      scoreB:           clasificacion.scoreB,
+      scoreA:           clasificacion.scoreA,
       clasificadoPorIA: clasificacion.usóIA,
-      prioridad: clasificacion.prioridad,
-      estado: 'nuevo',
-      primerMensaje: texto,
+      prioridad:        clasificacion.prioridad,
+      estado:           'nuevo',
+      primerMensaje:    texto,
       todosLosMensajes: texto,
-      ultimoTimestamp: new Date()
+      ultimoTimestamp:  new Date()
     }
   })
 
   await prisma.mensaje.create({
     data: {
-      leadId: lead.id,
+      leadId:    lead.id,
       tenantId,
       direccion: 'entrante',
       contenido: texto,
-      tipo: 'texto'
+      tipo:      'texto'
     }
   })
 
   await escribirLeadEnSheet(instancia, lead, clasificacion)
 
+  // 1. Mensaje de bienvenida
   const msgBienvenida = await getFlujo(prisma, tenantId, 'lead_nuevo') ||
     'Hola 🙋 te saluda Perú Exporta TV 🇵🇪\n\nNo necesitas tener producto propio para exportar — necesitas saber cómo.\n\n¿Cómo te llamas y qué producto o rubro quieres exportar? 👇'
 
   await enviarTexto(instancia, numero, msgBienvenida)
   await sleep(2000)
 
-  await enviarBotones(instancia, numero, '¿En qué etapa estás ahora mismo?', BOTONES_ETAPA)
+  // 2. Pregunta de etapa — texto numerado (funciona siempre, no depende de polls)
+  const msgEtapa = await getFlujo(prisma, tenantId, 'pregunta_etapa') || MENSAJE_ETAPA
+  await enviarTexto(instancia, numero, msgEtapa)
 
+  // Marcar que ya se envió la pregunta de etapa
+  await prisma.lead.update({
+    where: { id: lead.id },
+    data: { estado: 'esperando_etapa' }
+  })
+
+  // 3. Notificar vendedor si es lead urgente
   if (clasificacion.tipo === 'B' && clasificacion.prioridad === 'URGENTE') {
     await notificarVendedor(instancia, vendedor, lead, clasificacion)
   }
@@ -155,12 +197,19 @@ async function manejarLeadNuevo({ prisma, instancia, numero, texto, tenantId, ve
   console.log(`[Webhook] Lead nuevo procesado: ${clasificacion.nombre || numero} | ${clasificacion.tipoPreciso} | Score: ${clasificacion.scoreTotal}`)
 }
 
-async function manejarRespuestaBoton({ prisma, instancia, numero, texto, leadExistente, tenantId }) {
+async function manejarRespuestaEtapa({ prisma, instancia, numero, texto, leadExistente, tenantId }) {
   let tipo = 'A'
   let tipoPreciso = 'Tipo A — formación'
   let prioridad = 'MEDIA'
 
-  if (texto.includes('Ya tengo producto') || texto.includes('Ya vendo')) {
+  const textoNorm = texto.toLowerCase()
+  if (
+    textoNorm.includes('ya tengo') ||
+    textoNorm.includes('ya vendo') ||
+    texto.includes('2') ||
+    texto.includes('3') ||
+    texto.includes('tipo_b')
+  ) {
     tipo = 'B'
     tipoPreciso = 'Tipo B — broker'
     prioridad = 'ALTA'
@@ -168,7 +217,13 @@ async function manejarRespuestaBoton({ prisma, instancia, numero, texto, leadExi
 
   await prisma.lead.update({
     where: { id: leadExistente.id },
-    data: { tipo, tipoPreciso, prioridad, estado: 'por_llamar', ultimoTimestamp: new Date() }
+    data: {
+      tipo,
+      tipoPreciso,
+      prioridad,
+      estado: 'por_llamar',
+      ultimoTimestamp: new Date()
+    }
   })
 
   await sleep(1500)
@@ -183,7 +238,7 @@ async function manejarRespuestaBoton({ prisma, instancia, numero, texto, leadExi
     'Perfecto, gracias por contarnos! 🙌\n\nUn asesor se comunicará contigo pronto. ¡Estate atento al teléfono! 📲'
   await enviarTexto(instancia, numero, msgAsesor)
 
-  console.log(`[Webhook] Lead ${numero} clasificado por botón: ${tipoPreciso}`)
+  console.log(`[Webhook] Lead ${numero} clasificado por etapa: ${tipoPreciso}`)
 }
 
 async function manejarImagenRecibida({ prisma, instancia, numero, leadExistente, tenantId }) {
@@ -209,11 +264,11 @@ async function manejarMensajeAdicional({ prisma, instancia, numero, texto, leadE
 
   await prisma.mensaje.create({
     data: {
-      leadId: leadExistente.id,
-      tenantId: leadExistente.tenantId,
+      leadId:    leadExistente.id,
+      tenantId:  leadExistente.tenantId,
       direccion: 'entrante',
       contenido: texto,
-      tipo: 'texto'
+      tipo:      'texto'
     }
   })
 
@@ -224,40 +279,61 @@ async function manejarMensajeAdicional({ prisma, instancia, numero, texto, leadE
       await prisma.lead.update({
         where: { id: leadExistente.id },
         data: {
-          tipo: clasificacion.tipo,
-          tipoPreciso: clasificacion.tipoPreciso,
-          scoreTotal: clasificacion.scoreTotal,
-          scoreB: clasificacion.scoreB,
-          scoreA: clasificacion.scoreA,
+          tipo:             clasificacion.tipo,
+          tipoPreciso:      clasificacion.tipoPreciso,
+          scoreTotal:       clasificacion.scoreTotal,
+          scoreB:           clasificacion.scoreB,
+          scoreA:           clasificacion.scoreA,
           clasificadoPorIA: clasificacion.usóIA,
-          prioridad: clasificacion.prioridad,
-          nombre: clasificacion.nombre || leadExistente.nombre,
-          producto: clasificacion.producto || leadExistente.producto,
+          prioridad:        clasificacion.prioridad,
+          nombre:           clasificacion.nombre || leadExistente.nombre,
+          producto:         clasificacion.producto || leadExistente.producto,
         }
       })
       console.log(`[Webhook] Lead ${numero} reclasificado: ${clasificacion.tipoPreciso} | Score: ${clasificacion.scoreTotal}`)
     }
   }
 
+  // ── CORRECCIÓN CRÍTICA ─────────────────────────────────────────────────────
+  // Solo enviar pregunta de etapa si el lead está en estado 'nuevo'
+  // Y solo UNA vez — luego cambia a 'esperando_etapa'
   if (leadExistente.estado === 'nuevo') {
-    await enviarBotones(instancia, numero, '¿En qué etapa estás ahora mismo?', BOTONES_ETAPA)
+    const msgEtapa = MENSAJE_ETAPA
+    await enviarTexto(instancia, numero, msgEtapa)
+    await prisma.lead.update({
+      where: { id: leadExistente.id },
+      data: { estado: 'esperando_etapa' }
+    })
   }
+  // ──────────────────────────────────────────────────────────────────────────
 }
 
 async function notificarVendedor(instancia, vendedor, lead, clasificacion) {
-  const numeroVendedor = process.env[`NUMERO_${vendedor.nombre.toUpperCase()}`]
+  const nombreUpper = vendedor.nombre?.toUpperCase().replace(/\s+/g, '_')
+  const numeroVendedor = process.env[`NUMERO_${nombreUpper}`]
   if (!numeroVendedor) return
 
-  const msg = `🔥 LEAD URGENTE\n\nNombre: ${clasificacion.nombre || 'Sin nombre'}\nNúmero: ${lead.numero}\nProducto: ${clasificacion.producto || 'Sin producto'}\nTipo: ${clasificacion.tipoPreciso}\nScore: ${clasificacion.scoreTotal} pts\n\n¡Llama ahora! 📞`
+  const msg =
+    `🔥 LEAD URGENTE\n\n` +
+    `Nombre: ${clasificacion.nombre || 'Sin nombre'}\n` +
+    `Número: ${lead.numero}\n` +
+    `Producto: ${clasificacion.producto || 'Sin producto'}\n` +
+    `Tipo: ${clasificacion.tipoPreciso}\n` +
+    `Score: ${clasificacion.scoreTotal} pts\n\n` +
+    `¡Llama ahora! 📞`
 
   await enviarTexto(instancia, numeroVendedor, msg)
 }
 
-function esBtnCalificacion(texto) {
-  return texto.includes('empezando desde cero') ||
-         texto.includes('Ya tengo producto') ||
-         texto.includes('Ya vendo') ||
-         ['tipo_a_inicio', 'tipo_b_producto', 'tipo_b_vende'].includes(texto)
+function esRespuestaEtapa(texto) {
+  const t = texto.toLowerCase().trim()
+  return (
+    t === '1' || t === '2' || t === '3' ||
+    t.includes('empezando desde cero') ||
+    t.includes('ya tengo producto') ||
+    t.includes('ya vendo') ||
+    ['tipo_a_inicio', 'tipo_b_producto', 'tipo_b_vende'].includes(t)
+  )
 }
 
 function sleep(ms) {
