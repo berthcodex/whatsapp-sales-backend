@@ -662,6 +662,22 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
         ? Math.floor((Date.now() - new Date(lead.handoffEn).getTime()) / 60000)
         : 999
 
+      // Contar mensajes entrantes del lead desde el HANDOFF sin respuesta del bot
+      // Si el lead escribe 2+ veces sin atención → escalar urgente al vendedor
+      const mensajesPostHandoff = await prisma.mensaje.count({
+        where: {
+          leadId: lead.id,
+          direccion: 'ENTRANTE',
+          enviadoEn: { gte: lead.handoffEn || new Date() }
+        }
+      })
+      if (mensajesPostHandoff >= 2) {
+        await renotificarVendedor({
+          prisma, instancia, lead, vendedor,
+          motivo: `🚨 *LEAD PERDIENDO PACIENCIA — ${mensajesPostHandoff} mensajes sin atención*\n⏰ Lleva ${minutosDesdeHandoff} min esperando`
+        })
+      }
+
       // ── CASUÍSTICA 1: Lead manda voucher/imagen ───────────────────
       // Ya manejado antes en el flujo principal (tieneImagen)
       // No llega aquí — se intercepta antes.
