@@ -227,6 +227,10 @@ async function notificarVendedor({ prisma, instancia, lead, vendedor }) {
     const v = await prisma.vendedor.findUnique({ where: { id: vendedor.id } })
     if (!v?.whatsappNumber) return
 
+    // Leer nombre actualizado del lead desde la DB
+    const leadActual = await prisma.lead.findUnique({ where: { id: lead.id } })
+    const nombreLead = leadActual?.nombre || lead.nombre || 'Sin nombre'
+
     // Tiempo en sistema
     const tiempoEnSistema = lead.creadoEn
       ? Math.floor((Date.now() - new Date(lead.creadoEn).getTime()) / 60000)
@@ -251,7 +255,7 @@ async function notificarVendedor({ prisma, instancia, lead, vendedor }) {
 
     const msg =
       `🔥 *LEAD CALIENTE — LISTO PARA LLAMAR*\n\n` +
-      `👤 *Nombre:* ${lead.nombre || 'Sin nombre'}\n` +
+      `👤 *Nombre:* ${nombreLead}\n` +
       `📱 *Número:* wa.me/${lead.numero}\n` +
       `📦 *Producto:* ${lead.producto || 'Sin producto'}\n` +
       `🎯 *Perfil:* ${lead.tipoPreciso || lead.tipo}\n` +

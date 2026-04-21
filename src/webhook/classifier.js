@@ -215,14 +215,20 @@ const PRODUCTOS_STEMS = [
 
 // Patrones regex para extracción de nombre — portados desde Apps Script
 const PATRONES_NOMBRE = [
+  // Patrón 1: "soy / me llamo / mi nombre es"
   /(?:soy|me llamo|mi nombre es|mi nombre:)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i,
+  // Patrón 2: "buenos días, soy / me llamo"
   /(?:buenos\s+d[ií]as|buenas\s+tardes|buenas\s+noches|buenas)[,.]?\s+(?:soy|me llamo)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i,
+  // Patrón 3: "Nombre Apellido," al inicio
   /^([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,})?),\s/,
+  // Patrón 4: "mi nombre: X"
   /mi nombre\s*[:\-]?\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i,
-  /^([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,})+)/,
+  // Patrón 5: DOS palabras en mayúscula al inicio (Nombre Apellido)
   /^([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,})(?:\s|,|\.)/,
+  // Patrón 6: "habla / llama / escribe X"
   /(?:habla|llama|escribe)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i,
-  /(?:el señor|la señora|don|doña)?\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i,
+  // Patrón 7: "don / doña / el señor X" — requiere título, no captura saludos solos
+  /(?:el señor|la señora|don|doña)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i,
 ]
 
 // ============================================
