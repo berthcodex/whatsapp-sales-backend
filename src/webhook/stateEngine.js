@@ -472,8 +472,15 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
     case 'EXPERIENCIA': {
       // En este estado ya tenemos nombre y producto.
       // Solo falta confirmar si ya exportó antes.
-      const yaExporto = contieneAlguna(texto, ['ya exporté', 'ya exporto', 'tengo experiencia', 'si he exportado', 'exporto actualmente'])
-      const desdesCero = contieneAlguna(texto, KEYWORDS_EXPLORANDO)
+      const yaExporto = contieneAlguna(texto, [
+        'ya exporté', 'ya exporto', 'tengo experiencia', 'si he exportado',
+        'exporto actualmente', 'ya exporté antes', 'exporté antes',
+        '1️⃣', 'opcion 1', 'opción 1', 'numero 1', 'número 1'
+      ]) || norm(texto).trim() === '1'
+      const desdesCero = contieneAlguna(texto, [
+        ...KEYWORDS_EXPLORANDO,
+        '2️⃣', 'opcion 2', 'opción 2', 'numero 2', 'número 2'
+      ]) || norm(texto).trim() === '2'
 
       if (yaExporto || desdesCero) {
         // El lead respondió explícitamente sobre su experiencia → ir a PRESENTACION
