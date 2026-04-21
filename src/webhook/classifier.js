@@ -352,8 +352,13 @@ TIPOS:
 Responde SOLO con este JSON, sin explicación:
 {"tipo": "A" o "B", "razon": "máximo 10 palabras", "prioridad": "ALTA" o "MEDIA"}`
 
+    // Timeout de 3 segundos — si Groq no responde, usamos default
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 3000)
+
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
         'Content-Type': 'application/json'
@@ -366,6 +371,7 @@ Responde SOLO con este JSON, sin explicación:
       })
     })
 
+    clearTimeout(timeout)
     if (!response.ok) throw new Error(`Groq error: ${response.status}`)
 
     const data = await response.json()

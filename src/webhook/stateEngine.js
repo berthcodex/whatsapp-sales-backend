@@ -224,12 +224,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 // ================================================================
 async function notificarVendedor({ prisma, instancia, lead, vendedor }) {
   try {
-    // Buscar número del vendedor desde la DB
-    const v = await prisma.vendedor.findUnique({
-      where: { id: vendedor.id }
-    })
+    const v = await prisma.vendedor.findUnique({ where: { id: vendedor.id } })
     if (!v?.whatsappNumber) return
 
+    // Tiempo en sistema
     const tiempoEnSistema = lead.creadoEn
       ? Math.floor((Date.now() - new Date(lead.creadoEn).getTime()) / 60000)
       : null
@@ -238,18 +236,28 @@ async function notificarVendedor({ prisma, instancia, lead, vendedor }) {
         ? `${tiempoEnSistema} min`
         : `${Math.floor(tiempoEnSistema / 60)}h ${tiempoEnSistema % 60}m`
       : ''
-    const primerMsg = lead.primerMensaje
-      ? `"${lead.primerMensaje.slice(0, 80)}${lead.primerMensaje.length > 80 ? '...' : ''}"`
+
+    // Leer historial completo de mensajes entrantes del lead
+    const mensajes = await prisma.mensaje.findMany({
+      where: { leadId: lead.id, direccion: 'ENTRANTE' },
+      orderBy: { enviadoEn: 'asc' },
+      take: 10
+    })
+
+    const historial = mensajes.length > 0
+      ? mensajes.map(m => `  › "${m.contenido.slice(0, 100)}${m.contenido.length > 100 ? '...' : ''}"`)
+          .join('\n')
       : null
+
     const msg =
       `🔥 *LEAD CALIENTE — LISTO PARA LLAMAR*\n\n` +
       `👤 *Nombre:* ${lead.nombre || 'Sin nombre'}\n` +
-      `📱 *Número:* ${lead.numero}\n` +
+      `📱 *Número:* wa.me/${lead.numero}\n` +
       `📦 *Producto:* ${lead.producto || 'Sin producto'}\n` +
       `🎯 *Perfil:* ${lead.tipoPreciso || lead.tipo}\n` +
       `⚡ *Prioridad:* ${lead.prioridad}\n` +
       (tiempoStr ? `⏱ *En sistema:* ${tiempoStr}\n` : '') +
-      (primerMsg ? `💬 *Dijo:* ${primerMsg}\n` : '') +
+      (historial ? `\n💬 *Lo que dijo el lead:*\n${historial}\n` : '') +
       `\n📞 *¡Llama ahora antes de que se enfríe!*`
 
     await enviarTexto(instancia, v.whatsappNumber, msg)
