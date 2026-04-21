@@ -386,10 +386,13 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
 
   if (!lead) {
     const cursoCampana = detectarCursoCampana(texto)
-    if (cursoCampana && !datosNuevos.tipo) {
-      datosNuevos.tipo = cursoCampana.curso
-      datosNuevos.tipoPreciso = cursoCampana.curso === 'B' ? 'Tipo B — broker' : 'Tipo A — formacion'
-      datosNuevos.prioridad = 'ALTA'
+    if (cursoCampana) {
+      if (!datosNuevos.tipo) {
+        datosNuevos.tipo = cursoCampana.tipo
+        datosNuevos.tipoPreciso = cursoCampana.tipo === 'B' ? 'Tipo B — broker' : 'Tipo A — formacion'
+        datosNuevos.prioridad = 'ALTA'
+      }
+      datosNuevos.cursoInteres = cursoCampana.slug  // 'MPX', 'E1K', 'CCI', etc.
     }
 
     lead = await prisma.lead.create({
@@ -404,6 +407,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         scoreA:           datosNuevos.scoreA || 0,
         clasificadoPorIA: datosNuevos.clasificadoPorIA || false,
         prioridad:        datosNuevos.prioridad || 'MEDIA',
+        cursoInteres:     datosNuevos.cursoInteres || null,
         estadoBot:        'BIENVENIDA',
         primerMensaje:    texto,
         ultimoTimestamp:  new Date()
@@ -551,17 +555,27 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
         const producto = lead.producto || 'tu producto'
         const tipo = lead.tipo || 'A'
 
+        // Prioridad: cursoInteres (exacto del Ad) > tipo (A/B inferido)
+        const cursoSlug = lead.cursoInteres
         let msgProducto
-        if (tipo === 'B') {
-          msgProducto = config?.msgProducto ||
+        if (cursoSlug === 'CCI' || tipo === 'B') {
+          msgProducto = config?.msgProductoB ||
             `Perfecto ${nombre}! Con *${producto}* tienes mucho potencial.\n\n` +
             `Curso: CONTACTA COMPRADORES INTERNACIONALES\n` +
             `2 sesiones por semana — Zoom (grabadas)\n` +
             `Precio regular: S/ 1,857\n` +
             `Precio anticipado: S/ 957\n\n` +
             `El objetivo: que contactes compradores reales en 2 meses.`
+        } else if (cursoSlug === 'MPX') {
+          msgProducto = config?.msgProductoMPX || config?.msgProductoA ||
+            `Perfecto ${nombre}!\n\n` +
+            `Curso: MI PRIMERA EXPORTACION\n` +
+            `Sabados — Zoom (grabadas)\n` +
+            `Precio regular: S/ 757\n` +
+            `Precio preventa: S/ 497\n\n` +
+            `Aprenderas a exportar por primera vez con inversion minima.`
         } else {
-          msgProducto = config?.msgProducto ||
+          msgProducto = config?.msgProductoA ||
             `Perfecto ${nombre}!\n\n` +
             `Curso Taller: EXPORTA CON 1,000 SOLES\n` +
             `Sabados — Zoom (grabadas)\n` +

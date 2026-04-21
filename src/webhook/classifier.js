@@ -80,31 +80,34 @@ const KEYWORDS_TIPO_A = [
 // Curso B (operadores):        "Contacta Compradores Internacionales"
 // ============================================
 
+// Cursos de Peru Exporta — detectados desde el primer mensaje del Ad
+// slug: identificador corto del curso usado en cursoInteres del lead
+// tipo: A = formacion basica, B = operadores avanzados
 export const CURSOS_PERU_EXPORTA = [
-  // ── Curso A: Exporta con 1,000 Soles ──────────────────────
-  { stem: 'exporta con 1',           curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'exporta con mil',         curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'exporta con 1000',        curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: '1000 soles',              curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: '1,000 soles',             curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'mil soles',               curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'exporta con poco',        curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'primera exportacion',     curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'primera exportación',     curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'mi primera exporta',      curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'curso basico',            curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'curso básico',            curso: 'A', nombre: 'Exporta con 1,000 Soles' },
-  { stem: 'taller exporta',          curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  // ── Curso: Mi Primera Exportacion (MPX) ─────────────────────
+  { stem: 'mi primera exporta',      slug: 'MPX', tipo: 'A', nombre: 'Mi Primera Exportacion' },
+  { stem: 'primera exportacion',     slug: 'MPX', tipo: 'A', nombre: 'Mi Primera Exportacion' },
+  { stem: 'primera exportacion',     slug: 'MPX', tipo: 'A', nombre: 'Mi Primera Exportacion' },
+  { stem: 'inscribirme en el curso de mi primera', slug: 'MPX', tipo: 'A', nombre: 'Mi Primera Exportacion' },
+  { stem: 'informacion de el curso mi primera',    slug: 'MPX', tipo: 'A', nombre: 'Mi Primera Exportacion' },
 
-  // ── Curso B: Contacta Compradores Internacionales ──────────
-  { stem: 'contacta compradores',    curso: 'B', nombre: 'Contacta Compradores Internacionales' },
-  { stem: 'compradores internacion', curso: 'B', nombre: 'Contacta Compradores Internacionales' },
-  { stem: 'contactar compradores',   curso: 'B', nombre: 'Contacta Compradores Internacionales' },
-  { stem: 'curso compradores',       curso: 'B', nombre: 'Contacta Compradores Internacionales' },
-  { stem: 'compradores reales',      curso: 'B', nombre: 'Contacta Compradores Internacionales' },
-  { stem: 'clientes internacion',    curso: 'B', nombre: 'Contacta Compradores Internacionales' },
-  { stem: 'curso avanzado',          curso: 'B', nombre: 'Contacta Compradores Internacionales' },
-  { stem: 'contacta clientes',       curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  // ── Curso: Exporta con 1,000 Soles (E1K) ────────────────────
+  { stem: 'exporta con 1',           slug: 'E1K', tipo: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'exporta con mil',         slug: 'E1K', tipo: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'exporta con 1000',        slug: 'E1K', tipo: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: '1000 soles',              slug: 'E1K', tipo: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'mil soles',               slug: 'E1K', tipo: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'taller exporta',          slug: 'E1K', tipo: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'exporta con poco',        slug: 'E1K', tipo: 'A', nombre: 'Exporta con 1,000 Soles' },
+
+  // ── Curso: Contacta Compradores Internacionales (CCI) ────────
+  { stem: 'contacta compradores',    slug: 'CCI', tipo: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'compradores internacion', slug: 'CCI', tipo: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'contactar compradores',   slug: 'CCI', tipo: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'curso compradores',       slug: 'CCI', tipo: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'compradores reales',      slug: 'CCI', tipo: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'clientes internacion',    slug: 'CCI', tipo: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'curso avanzado',          slug: 'CCI', tipo: 'B', nombre: 'Contacta Compradores Internacionales' },
 ]
 
 // Detecta si el primer mensaje menciona un curso específico.
@@ -124,10 +127,10 @@ export function detectarCursoCampana(texto) {
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
     if (norm.includes(stemNorm)) {
-      return { curso: c.curso, nombre: c.nombre }
+      return { slug: c.slug, tipo: c.tipo, nombre: c.nombre }
     }
   }
-  return null  // lead orgánico → flujo normal
+  return null  // lead organico — flujo normal
 }
 
 // Productos de exportación peruana — con stems
