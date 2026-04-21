@@ -38,12 +38,18 @@ export async function handleWebhook(request, reply, prisma) {
   try {
     const body = request.body
 
-    // Solo procesar mensajes entrantes
-    if (body.event !== 'messages.upsert' || !body.data) {
-      return reply.send({ status: 'ignored', reason: 'not_message_upsert' })
+    // Log de diagnóstico — ver todos los eventos que llegan
+    console.log(`[Handler] Evento recibido: ${body.event} | Instancia: ${body.instance}`)
+
+    // Solo procesar mensajes entrantes (upsert = nuevo, update = editado/leído)
+    if (!['messages.upsert', 'messages.update'].includes(body.event) || !body.data) {
+      return reply.send({ status: 'ignored', reason: `event_${body.event}` })
     }
 
-    const msg = request.body.data
+    // messages.update puede venir como array — tomamos el primer elemento
+    const msg = Array.isArray(request.body.data)
+      ? request.body.data[0]
+      : request.body.data
     const instancia = body.instance
 
     // Ignorar mensajes propios del bot
@@ -77,6 +83,14 @@ export async function handleWebhook(request, reply, prisma) {
       msg.message?.imageMessage ||
       msg.message?.documentMessage
     )
+
+    // Log de diagnóstico
+    console.log(`[Handler] Número: ${numero} | Texto: "${texto}" | Imagen: ${tieneImagen}`)
+
+    // Si no hay texto ni imagen — ignorar (ej: reacciones, estados)
+    if (!texto && !tieneImagen) {
+      return reply.send({ status: 'ignored', reason: 'no_text_no_image' })
+    }
 
     // Responder a Evolution API inmediatamente para evitar reintentos
     reply.send({ status: 'received' })
