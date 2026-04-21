@@ -4,6 +4,7 @@
 import { procesarConMotor } from './stateEngine.js'
 
 const mensajesProcesados = new Set()
+const debounceMap = new Map()
 
 function yaFueProcesado(messageId) {
   if (!messageId) return false
@@ -11,6 +12,17 @@ function yaFueProcesado(messageId) {
   mensajesProcesados.add(messageId)
   if (mensajesProcesados.size > 500) mensajesProcesados.clear()
   return false
+}
+
+function debeEsperar(numero, texto, callback) {
+  if (debounceMap.has(numero)) {
+    clearTimeout(debounceMap.get(numero).timer)
+  }
+  const timer = setTimeout(() => {
+    debounceMap.delete(numero)
+    callback()
+  }, 3000)
+  debounceMap.set(numero, { timer, texto })
 }
 
 async function getVendedorPorInstancia(prisma, instancia) {
@@ -61,9 +73,11 @@ export async function handleWebhook(request, reply, prisma) {
       return
     }
 
-    procesarConMotor({
-      prisma, instancia, numero, texto, tieneImagen, vendedor
-    }).catch(err => console.error('[Handler] Error:', err.message))
+    debeEsperar(numero, texto, () => {
+      procesarConMotor({
+        prisma, instancia, numero, texto, tieneImagen, vendedor
+      }).catch(err => console.error('[Handler] Error:', err.message))
+    })
 
   } catch (error) {
     console.error('[Handler] Error crítico:', error.message)
