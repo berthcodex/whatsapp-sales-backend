@@ -100,11 +100,12 @@ function contieneAlguna(texto, keywords) {
 // Analiza el mensaje y extrae TODO lo que pueda de una vez.
 // No hace preguntas redundantes sobre lo que ya sabe.
 // ================================================================
-async function extraerDatosDelMensaje(texto, leadActual) {
+async function extraerDatosDelMensaje(texto, leadActual, omitirNombre = false) {
   const datos = {}
 
-  // Nombre — solo si no lo tenemos
-  if (!leadActual.nombre) {
+  // Nombre — solo si no lo tenemos Y no es el primer mensaje del Ad
+  // El primer mensaje es predeterminado ("Hola, info del curso...") — no tiene nombre real
+  if (!leadActual.nombre && !omitirNombre) {
     const nombre = extraerNombre(texto)
     if (nombre) datos.nombre = nombre
   }
@@ -341,11 +342,14 @@ export async function procesarConMotor({
   }
 
   // ── 5. EXTRAER DATOS DEL MENSAJE ─────────────────────────────
-  // Si el lead ya está en HANDOFF no necesitamos re-clasificarlo.
-  // Saltamos extracción para evitar llamadas innecesarias a Groq.
+  // Si el lead ya está en HANDOFF → saltamos extracción (evita Groq innecesario)
+  // Si es lead NUEVO (sin lead en DB) → saltamos extracción de NOMBRE del primer mensaje
+  // El primer mensaje siempre es el predeterminado del Ad — el nombre real
+  // llega en la respuesta siguiente del lead.
+  const esLeadNuevo = !lead
   const datosNuevos = (lead && lead.estadoBot === 'HANDOFF')
     ? {}
-    : await extraerDatosDelMensaje(texto, lead || {})
+    : await extraerDatosDelMensaje(texto, lead || {}, esLeadNuevo)
 
   // ── 6. LEAD NUEVO ─────────────────────────────────────────────
   if (!lead) {
