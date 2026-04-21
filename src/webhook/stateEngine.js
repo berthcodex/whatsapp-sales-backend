@@ -293,13 +293,11 @@ export async function procesarConMotor({
 }) {
   const { id: vendedorId, tenantId } = vendedor
 
-  console.log(`[Motor] Procesando: ${numero} | Texto: "${texto}"`)
 
   // ── 1. BUSCAR LEAD EXISTENTE (deduplicación por tenant) ───────
   let lead = await prisma.lead.findFirst({
     where: { numero, tenantId }
   })
-  console.log(`[Motor] Lead encontrado: ${lead ? lead.estadoBot : 'NUEVO'}`)
 
   // ── 2. GUARDAR MENSAJE ENTRANTE ───────────────────────────────
   if (lead) {
@@ -319,9 +317,6 @@ export async function procesarConMotor({
     return
   }
 
-  console.log(`[Motor] TenantId: ${tenantId} | VendedorId: ${vendedorId}`)
-  console.log(`[Motor] datosNuevos keys:`, Object.keys(datosNuevos))
-  console.log(`[Motor] lead.estadoBot:`, lead.estadoBot)
 
   // ── 4. HANDOFF INMEDIATO por keyword ─────────────────────────
   if (lead && contieneAlguna(texto, KEYWORDS_HANDOFF_INMEDIATO)) {
@@ -403,7 +398,6 @@ export async function procesarConMotor({
     if (datosNuevos.prioridad)    datosLimpios.prioridad    = datosNuevos.prioridad
     if (datosNuevos.clasificadoPorIA !== undefined) datosLimpios.clasificadoPorIA = datosNuevos.clasificadoPorIA
     datosLimpios.ultimoTimestamp = new Date()
-    console.log(`[Motor] Actualizando lead con:`, JSON.stringify(datosLimpios))
     try {
       lead = await prisma.lead.update({
         where: { id: lead.id },
@@ -415,7 +409,6 @@ export async function procesarConMotor({
   }
 
   // ── 8. EJECUTAR LÓGICA DEL ESTADO ACTUAL ─────────────────────
-  console.log(`[Motor] Llamando ejecutarEstado — estado: ${lead.estadoBot}`)
   await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
 }
 
@@ -424,7 +417,6 @@ export async function procesarConMotor({
 // Decide qué hacer según el estado actual del lead
 // ================================================================
 async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto }) {
-  console.log(`[Motor] ejecutarEstado — estado: ${lead.estadoBot} | número: ${numero}`)
   try {
   const config = await getBotConfig(prisma, tenantId)
   const estado = lead.estadoBot
@@ -637,8 +629,6 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
 
     // ──────────────────────────────────────────────────────────
     case 'HANDOFF': {
-      console.log(`[Motor] Entrando a HANDOFF — número: ${numero} | texto: "${texto}"`)
-      console.log(`[Motor] handoffEn: ${lead.handoffEn} | minutosDesdeHandoff calculando...`)
       // ================================================================
       // HANDOFF INTELIGENTE — 6 casuísticas del lead que regresa
       //
@@ -650,13 +640,11 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
       const minutosDesdeHandoff = lead.handoffEn
         ? Math.floor((Date.now() - new Date(lead.handoffEn).getTime()) / 60000)
         : 999
-      console.log(`[Motor] minutosDesdeHandoff: ${minutosDesdeHandoff}`)
 
       // ── CASUÍSTICA 1: Lead manda voucher/imagen ───────────────────
       // Ya manejado antes en el flujo principal (tieneImagen)
       // No llega aquí — se intercepta antes.
 
-      console.log(`[Motor] Evaluando casuísticas HANDOFF...`)
       // ── CASUÍSTICA 2: Lead perdió interés ─────────────────────────
       const KEYWORDS_PERDIO_INTERES = [
         'ya no', 'no me interesa', 'gracias igual', 'dejalo',
