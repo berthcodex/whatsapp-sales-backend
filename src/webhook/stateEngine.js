@@ -498,16 +498,32 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
 
     // ──────────────────────────────────────────────────────────
     case 'EXPERIENCIA': {
-      // En este estado ya tenemos nombre y producto.
-      // Solo falta confirmar si ya exportó antes.
-      const yaExporto = contieneAlguna(texto, [
+      // Solo detectar respuesta si el lead ya recibió la pregunta.
+      // Si no hay mensajes SALIENTES en estado EXPERIENCIA → es el primer
+      // mensaje del lead (o del Ad) y NO debe interpretarse como respuesta.
+      const mensajesSalientes = await prisma.mensaje.count({
+        where: { leadId: lead.id, direccion: 'SALIENTE', estadoBot: 'EXPERIENCIA' }
+      })
+      const esPrimerMensaje = mensajesSalientes === 0
+
+      const yaExporto = !esPrimerMensaje && (contieneAlguna(texto, [
         'ya exporté', 'ya exporto', 'tengo experiencia', 'si he exportado',
         'exporto actualmente', 'ya exporté antes', 'exporté antes',
         '1️⃣', 'opcion 1', 'opción 1', 'numero 1', 'número 1'
-      ]) || norm(texto).trim() === '1'
-      const desdesCero = contieneAlguna(texto, [
-        ...KEYWORDS_EXPLORANDO,
+      ]) || norm(texto).trim() === '1')
+
+      const desdesCero = !esPrimerMensaje && (contieneAlguna(texto, [
+        'desde cero', 'sin experiencia', 'no he exportado', 'nunca he exportado',
+        'primera vez', 'recién empezando', 'no tengo experiencia',
         '2️⃣', 'opcion 2', 'opción 2', 'numero 2', 'número 2'
+      ]) || norm(texto).trim() === '2')
+
+      if (yaExporto || desdesCero) {
+        await avanzarEstado(prisma, lead, 'PRESENTACION')
+        lead.estadoBot = 'PRESENTACION'
+        await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
+        return
+      }pción 2', 'numero 2', 'número 2'
       ]) || norm(texto).trim() === '2'
 
       if (yaExporto || desdesCero) {
