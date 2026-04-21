@@ -293,10 +293,13 @@ export async function procesarConMotor({
 }) {
   const { id: vendedorId, tenantId } = vendedor
 
+  console.log(`[Motor] Procesando: ${numero} | Texto: "${texto}"`)
+
   // ── 1. BUSCAR LEAD EXISTENTE (deduplicación por tenant) ───────
   let lead = await prisma.lead.findFirst({
     where: { numero, tenantId }
   })
+  console.log(`[Motor] Lead encontrado: ${lead ? lead.estadoBot : 'NUEVO'}`)
 
   // ── 2. GUARDAR MENSAJE ENTRANTE ───────────────────────────────
   if (lead) {
@@ -315,6 +318,8 @@ export async function procesarConMotor({
     await manejarPosiblePago({ prisma, instancia, numero, lead, tenantId, vendedor })
     return
   }
+
+  console.log(`[Motor] TenantId: ${tenantId} | VendedorId: ${vendedorId}`)
 
   // ── 4. HANDOFF INMEDIATO por keyword ─────────────────────────
   if (lead && contieneAlguna(texto, KEYWORDS_HANDOFF_INMEDIATO)) {
@@ -398,6 +403,8 @@ export async function procesarConMotor({
 // Decide qué hacer según el estado actual del lead
 // ================================================================
 async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto }) {
+  console.log(`[Motor] ejecutarEstado — estado: ${lead.estadoBot} | número: ${numero}`)
+  try {
   const config = await getBotConfig(prisma, tenantId)
   const estado = lead.estadoBot
 
@@ -609,6 +616,7 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
 
     // ──────────────────────────────────────────────────────────
     case 'HANDOFF': {
+      console.log(`[Motor] Entrando a HANDOFF — número: ${numero} | texto: "${texto}"`)
       // ================================================================
       // HANDOFF INTELIGENTE — 6 casuísticas del lead que regresa
       //
@@ -797,6 +805,10 @@ Ya escalé tu caso como *URGENTE* — un asesor te llama hoy.
       }
       break
     }
+  }
+  } catch (err) {
+    console.error(`[Motor] ERROR en estado ${lead?.estadoBot}:`, err.message)
+    console.error(err.stack)
   }
 }
 
