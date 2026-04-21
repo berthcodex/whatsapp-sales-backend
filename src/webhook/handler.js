@@ -103,6 +103,7 @@ export async function handleWebhook(request, reply, prisma) {
     }
 
     // Delegar al motor de estados — toda la lógica vive ahí
+    console.log(`[Handler] Delegando al motor — instancia: ${instancia} | vendedor: ${vendedor.nombre}`)
     procesarConMotor({
       prisma,
       instancia,
@@ -110,7 +111,7 @@ export async function handleWebhook(request, reply, prisma) {
       texto,
       tieneImagen,
       vendedor
-    }).catch(err => console.error('[Handler] Error en motor:', err))
+    }).catch(err => console.error('[Handler] Error en motor:', err.message, err.stack))
 
   } catch (error) {
     console.error('[Handler] Error crítico:', error)
