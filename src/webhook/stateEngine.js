@@ -384,17 +384,32 @@ export async function procesarConMotor({
   }
 
   // ── 7. LEAD EXISTENTE — actualizar datos si hay nuevos ────────
+  // Solo pasar campos que existen en el schema de Prisma
   if (Object.keys(datosNuevos).length > 0) {
-    lead = await prisma.lead.update({
-      where: { id: lead.id },
-      data: {
-        ...datosNuevos,
-        ultimoTimestamp: new Date()
-      }
-    })
+    const datosLimpios = {}
+    if (datosNuevos.nombre)       datosLimpios.nombre       = datosNuevos.nombre
+    if (datosNuevos.producto)     datosLimpios.producto     = datosNuevos.producto
+    if (datosNuevos.tipo)         datosLimpios.tipo         = datosNuevos.tipo
+    if (datosNuevos.tipoPreciso)  datosLimpios.tipoPreciso  = datosNuevos.tipoPreciso
+    if (datosNuevos.scoreTotal)   datosLimpios.scoreTotal   = datosNuevos.scoreTotal
+    if (datosNuevos.scoreB)       datosLimpios.scoreB       = datosNuevos.scoreB
+    if (datosNuevos.scoreA)       datosLimpios.scoreA       = datosNuevos.scoreA
+    if (datosNuevos.prioridad)    datosLimpios.prioridad    = datosNuevos.prioridad
+    if (datosNuevos.clasificadoPorIA !== undefined) datosLimpios.clasificadoPorIA = datosNuevos.clasificadoPorIA
+    datosLimpios.ultimoTimestamp = new Date()
+    console.log(`[Motor] Actualizando lead con:`, JSON.stringify(datosLimpios))
+    try {
+      lead = await prisma.lead.update({
+        where: { id: lead.id },
+        data: datosLimpios
+      })
+    } catch (err) {
+      console.error('[Motor] Error actualizando lead:', err.message)
+    }
   }
 
   // ── 8. EJECUTAR LÓGICA DEL ESTADO ACTUAL ─────────────────────
+  console.log(`[Motor] Llamando ejecutarEstado — estado: ${lead.estadoBot}`)
   await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
 }
 
