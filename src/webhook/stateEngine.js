@@ -320,6 +320,8 @@ export async function procesarConMotor({
   }
 
   console.log(`[Motor] TenantId: ${tenantId} | VendedorId: ${vendedorId}`)
+  console.log(`[Motor] datosNuevos keys:`, Object.keys(datosNuevos))
+  console.log(`[Motor] lead.estadoBot:`, lead.estadoBot)
 
   // ── 4. HANDOFF INMEDIATO por keyword ─────────────────────────
   if (lead && contieneAlguna(texto, KEYWORDS_HANDOFF_INMEDIATO)) {
@@ -330,7 +332,11 @@ export async function procesarConMotor({
   }
 
   // ── 5. EXTRAER DATOS DEL MENSAJE ─────────────────────────────
-  const datosNuevos = await extraerDatosDelMensaje(texto, lead || {})
+  // Si el lead ya está en HANDOFF no necesitamos re-clasificarlo.
+  // Saltamos extracción para evitar llamadas innecesarias a Groq.
+  const datosNuevos = (lead && lead.estadoBot === 'HANDOFF')
+    ? {}
+    : await extraerDatosDelMensaje(texto, lead || {})
 
   // ── 6. LEAD NUEVO ─────────────────────────────────────────────
   if (!lead) {
