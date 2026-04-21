@@ -416,9 +416,12 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
       const falta = datosFaltantes(lead)
 
       if (falta.length === 0) {
-        // Tenemos todo → saltar directo a PRESENTACION
-        await avanzarEstado(prisma, lead, 'PRESENTACION')
-        lead.estadoBot = 'PRESENTACION'
+        // Tenemos nombre, producto y tipo — pero SIEMPRE preguntamos experiencia.
+        // La experiencia no la puede inferir el classifier — es una respuesta
+        // del lead que el vendedor necesita para preparar la llamada.
+        // Nunca saltamos de BIENVENIDA directo a PRESENTACION.
+        await avanzarEstado(prisma, lead, 'EXPERIENCIA')
+        lead.estadoBot = 'EXPERIENCIA'
         await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
         return
       }
@@ -443,7 +446,8 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
       const falta = datosFaltantes(lead)
 
       if (falta.length === 0) {
-        // Ya tenemos todo → ir a EXPERIENCIA
+        // Tenemos nombre, producto y tipo → ir a EXPERIENCIA siempre
+        // Nunca saltar a PRESENTACION desde aquí
         await avanzarEstado(prisma, lead, 'EXPERIENCIA')
         lead.estadoBot = 'EXPERIENCIA'
         await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
