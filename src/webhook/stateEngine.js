@@ -475,15 +475,16 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
       const yaExporto = contieneAlguna(texto, ['ya exporté', 'ya exporto', 'tengo experiencia', 'si he exportado', 'exporto actualmente'])
       const desdesCero = contieneAlguna(texto, KEYWORDS_EXPLORANDO)
 
-      if (yaExporto || desdesCero || lead.tipo) {
-        // Tenemos suficiente → ir a PRESENTACION
+      if (yaExporto || desdesCero) {
+        // El lead respondió explícitamente sobre su experiencia → ir a PRESENTACION
         await avanzarEstado(prisma, lead, 'PRESENTACION')
         lead.estadoBot = 'PRESENTACION'
         await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
         return
       }
 
-      // Preguntar experiencia
+      // Siempre preguntar experiencia — el classifier no puede saberlo
+      // El vendedor necesita esta información para preparar la llamada
       const nombre = lead.nombre ? `${lead.nombre}` : ''
       const msg = config?.msgExperiencia ||
         `${nombre ? nombre + ', ' : ''}¿ya tienes experiencia exportando o vas desde cero? 👇\n\n1️⃣ Ya exporté antes\n2️⃣ Voy desde cero`
