@@ -1,254 +1,116 @@
-// prisma/schema.prisma
-// Hidata — Schema Sprint 1
-// Multitenant desde el día 1: tenant_id en todas las tablas
-// Actualizado: 20 Abril 2026
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
-// ============================================
-// ENUMS
-// ============================================
+// ─── Vendedores ───────────────────────────────────────────────
+model Vendor {
+  id        Int        @id @default(autoincrement())
+  nombre    String
+  telefono  String     @unique
+  role      Role       @default(VENDOR)
+  activo    Boolean    @default(true)
+  campaigns Campaign[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 
-/// Los 7 estados del motor conversacional.
-/// Son un contrato cerrado — no se pueden agregar sin migración.
-enum EstadoBot {
-  BIENVENIDA
-  PRODUCTO
-  EXPERIENCIA
-  PRESENTACION
-  OBJECION
-  URGENCIA
-  HANDOFF
+  @@map("vendors")
 }
 
-enum DireccionMensaje {
-  ENTRANTE
-  SALIENTE
-}
-
-enum RolVendedor {
+enum Role {
   ADMIN
-  VENDEDOR
-  SUPERVISOR
+  VENDOR
 }
 
-// ============================================
-// TENANT — Una empresa = un tenant
-// Peru Exporta es el primer tenant
-// ============================================
-model Tenant {
-  id         String   @id @default(uuid())
-  nombre     String
-  slug       String   @unique              // "peru-exporta"
-  plan       String   @default("starter")  // starter | pro | enterprise
-  activo     Boolean  @default(true)
-  creadoEn   DateTime @default(now())
-  updatedEn  DateTime @updatedAt
+// ─── Campañas ─────────────────────────────────────────────────
+model Campaign {
+  id        Int        @id @default(autoincrement())
+  slug      String     @unique  // MPX, E1K, CCI
+  nombre    String
+  activa    Boolean    @default(true)
+  vendorId  Int
+  vendor    Vendor     @relation(fields: [vendorId], references: [id])
+  triggers  Trigger[]
+  steps     FlowStep[]
+  leads     Lead[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 
-  vendedores Vendedor[]
-  leads      Lead[]
-  mensajes   Mensaje[]
-  flujos     Flujo[]
-  botConfigs BotConfig[]
-
-  @@map("tenants")
+  @@map("campaigns")
 }
 
-// ============================================
-// VENDEDOR — Joan, Cristina, Francisco
-// Cada uno tiene su número WhatsApp propio
-// ============================================
-model Vendedor {
-  id                 String      @id @default(uuid())
-  tenantId           String
-  nombre             String
-  email              String?
-  passwordHash       String?
-  rol                RolVendedor @default(VENDEDOR)
-  whatsappNumber     String      @unique  // "+51XXXXXXXXX" — routing de leads
-  instanciaEvolution String?     @unique  // "peru-exporta-joan"
-  activo             Boolean     @default(true)
-  creadoEn           DateTime    @default(now())
-  updatedEn          DateTime    @updatedAt
+// ─── Triggers (mensajes del ad que activan la campaña) ─────────
+model Trigger {
+  id         Int      @id @default(autoincrement())
+  texto      String
+  campaignId Int
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
-  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  leads    Lead[]
-  mensajes Mensaje[]
-
-  @@index([tenantId])
-  @@index([whatsappNumber])
-  @@map("vendedores")
+  @@map("triggers")
 }
 
-// ============================================
-// LEAD — El corazón del sistema
-// 1 teléfono = 1 lead por tenant (deduplicación global)
-// ============================================
+// ─── Pasos del flujo ──────────────────────────────────────────
+model FlowStep {
+  id           Int      @id @default(autoincrement())
+  orden        Int
+  tipo         StepType // MSG | FOLLOWUP | NOTIFY
+  mensaje      String   @db.Text
+  followupHrs  Int?     // solo si tipo=FOLLOWUP: horas de espera sin respuesta
+  campaignId   Int
+  campaign     Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, orden])
+  @@map("flow_steps")
+}
+
+enum StepType {
+  MSG       // mensaje secuencial al lead
+  FOLLOWUP  // si el lead no responde en X horas
+  NOTIFY    // notifica al vendedor con historial
+}
+
+// ─── Leads ────────────────────────────────────────────────────
 model Lead {
-  id         String    @id @default(uuid())
-  tenantId   String
-  vendedorId String?
+  id           Int          @id @default(autoincrement())
+  telefono     String       @unique
+  campaignId   Int?
+  campaign     Campaign?    @relation(fields: [campaignId], references: [id])
+  pasoActual   Int          @default(0)  // índice del paso donde está el lead
+  ultimoMensaje DateTime?                // cuándo respondió por última vez
+  notificado   Boolean      @default(false)
+  estado       LeadEstado   @default(NUEVO)
+  mensajes     Message[]
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
-  // Datos del lead
-  nombre   String?
-  numero   String
-  producto String?
-  region   String?
-
-  // Clasificación
-  tipo             String  @default("A")
-  tipoPreciso      String?
-  scoreTotal       Int     @default(0)
-  scoreB           Int     @default(0)
-  scoreA           Int     @default(0)
-  clasificadoPorIA Boolean @default(false)
-
-  // Pipeline
-  prioridad String @default("MEDIA")
-
-  // Motor conversacional — 7 estados
-  estadoBot         EstadoBot  @default(BIENVENIDA)
-  estadoBotAnterior EstadoBot?
-  handoffEn         DateTime?
-  handoffPor        String?
-
-  // Tracking
-  primerMensaje   String?
-  cursoInteres    String?  // slug del curso detectado desde el Ad: 'MPX', 'E1K', etc.
-  ultimoTimestamp DateTime?
-
-  // Fechas
-  creadoEn      DateTime  @default(now())
-  actualizadoEn DateTime  @updatedAt
-  fechaLlamada  DateTime?
-  resultado     String?
-
-  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  vendedor Vendedor? @relation(fields: [vendedorId], references: [id])
-  mensajes Mensaje[]
-
-  @@unique([numero, tenantId])
-  @@index([tenantId])
-  @@index([vendedorId])
-  @@index([estadoBot])
   @@map("leads")
 }
 
-// ============================================
-// MENSAJE — Historial completo de conversación
-// ============================================
-model Mensaje {
-  id         String           @id @default(uuid())
-  leadId     String
-  tenantId   String
-  vendedorId String?
-  direccion  DireccionMensaje
-  contenido  String
-  estadoBot  EstadoBot?
-  tipo       String           @default("texto")
-  metadata   Json?
-  enviadoEn  DateTime         @default(now())
-
-  lead     Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  vendedor Vendedor? @relation(fields: [vendedorId], references: [id])
-
-  @@index([leadId])
-  @@index([tenantId])
-  @@index([enviadoEn])
-  @@map("mensajes")
+enum LeadEstado {
+  NUEVO
+  EN_FLUJO
+  NOTIFICADO
+  CERRADO
 }
 
-// ============================================
-// BOT CONFIG — Los 7 mensajes configurables por tenant
-// ============================================
-model BotConfig {
-  id       String  @id @default(uuid())
-  tenantId String
-  nombre   String
-  activo   Boolean @default(false)
+// ─── Historial de mensajes ────────────────────────────────────
+model Message {
+  id        Int         @id @default(autoincrement())
+  leadId    Int
+  lead      Lead        @relation(fields: [leadId], references: [id])
+  origen    MsgOrigen   // LEAD | BOT | VENDEDOR
+  texto     String      @db.Text
+  createdAt DateTime    @default(now())
 
-  nombreEmpresa  String
-  nombreProducto String
-
-  msgBienvenida   String @db.Text
-  msgProducto     String @db.Text
-  msgExperiencia  String @db.Text
-  msgPresentacion String @db.Text
-  msgObjecion     String @db.Text
-  msgUrgencia     String @db.Text
-  msgHandoff      String @db.Text
-
-  timeoutInactividad Int      @default(1440)
-  maxReintentos      Int      @default(2)
-  keywordsHandoff    String[] @default(["hablar con asesor", "quiero hablar", "precio", "descuento"])
-
-  creadoEn  DateTime @default(now())
-  updatedEn DateTime @updatedAt
-
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@index([tenantId])
-  @@map("bot_config")
+  @@map("messages")
 }
 
-// ============================================
-// FLUJO / PASO / TRIGGER — sin cambios Sprint 1
-// ============================================
-model Flujo {
-  id          String   @id @default(uuid())
-  tenantId    String
-  nombre      String
-  descripcion String?
-  trigger     String?
-  contenido   String?
-  botones     Json?
-  activo      Boolean  @default(true)
-  creadoEn    DateTime @default(now())
-
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  pasos  Paso[]
-
-  @@map("flujos")
-}
-
-model Paso {
-  id               String   @id @default(uuid())
-  flujoId          String
-  orden            Int
-  tipo             String
-  contenido        String?
-  botones          String?
-  condicion        String?
-  esperarRespuesta Boolean  @default(false)
-  siguientePasoId  String?
-
-  flujo    Flujo     @relation(fields: [flujoId], references: [id], onDelete: Cascade)
-  triggers Trigger[]
-
-  @@map("pasos")
-}
-
-model Trigger {
-  id                String  @id @default(uuid())
-  pasoId            String
-  tipo              String
-  minutosEspera     Int?
-  keywords          String?
-  evento            String?
-  botonId           String?
-  siguientePasoId   String?
-  accionAlternativa String?
-
-  paso Paso @relation(fields: [pasoId], references: [id], onDelete: Cascade)
-
-  @@map("triggers")
+enum MsgOrigen {
+  LEAD
+  BOT
+  VENDEDOR
 }

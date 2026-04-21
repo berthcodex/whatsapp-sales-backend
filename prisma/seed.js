@@ -1,292 +1,155 @@
-// prisma/seed.js
-// Crea los datos iniciales: tenant Peru Exporta + 3 vendedores + flujos base
-
-import { PrismaClient } from '@prisma/client'
-import bcrypt from 'bcrypt'
-
+const { PrismaClient } = require('@prisma/client')
 const prisma = new PrismaClient()
 
 async function main() {
-  console.log('🌱 Iniciando seed de base de datos...')
+  console.log('🌱 Seeding Hidata Sprint 2...')
 
-  // ============================================
-  // TENANT — Peru Exporta
-  // ============================================
-  const tenant = await prisma.tenant.upsert({
-    where: { id: 'peru-exporta-tenant-id' },
+  // ─── Vendors ──────────────────────────────────────────────
+  const joan = await prisma.vendor.upsert({
+    where: { telefono: '51924104066' },
     update: {},
-    create: {
-      id: 'peru-exporta-tenant-id',
-      nombre: 'Peru Exporta TV / ESCEX',
-      plan: 'pro'
-    }
+    create: { nombre: 'Joan', telefono: '51924104066', role: 'ADMIN' }
   })
-  console.log(`✅ Tenant: ${tenant.nombre}`)
 
-  // ============================================
-  // VENDEDORES — Joan, Cristina, Francisco
-  // ============================================
-  const passwordHash = await bcrypt.hash('peruexporta2024', 10)
-
-  const joan = await prisma.vendedor.upsert({
-    where: { instanciaEvolution: 'peru-exporta-joan' },
+  const cristina = await prisma.vendor.upsert({
+    where: { telefono: '51900000002' },
     update: {},
-    create: {
-      tenantId: tenant.id,
-      nombre: 'Joan',
-      email: 'albert.hidata@gmail.com',
-      passwordHash,
-      rol: 'ADMIN',
-      whatsappNumber: '51999999991',   // ← REEMPLAZAR con número real de Joan
-      instanciaEvolution: 'peru-exporta-joan'
-    }
+    create: { nombre: 'Cristina', telefono: '51900000002', role: 'VENDOR' }
   })
-  console.log(`✅ Vendedor: ${joan.nombre} (admin)`)
 
-  const cristina = await prisma.vendedor.upsert({
-    where: { instanciaEvolution: 'peru-exporta-cristina' },
+  const francisco = await prisma.vendor.upsert({
+    where: { telefono: '51900000003' },
     update: {},
-    create: {
-      tenantId: tenant.id,
-      nombre: 'Cristina',
-      passwordHash,
-      rol: 'VENDEDOR',
-      whatsappNumber: '51999999992',   // ← REEMPLAZAR con número real de Cristina
-      instanciaEvolution: 'peru-exporta-cristina'
-    }
+    create: { nombre: 'Francisco', telefono: '51900000003', role: 'VENDOR' }
   })
-  console.log(`✅ Vendedor: ${cristina.nombre}`)
 
-  const francisco = await prisma.vendedor.upsert({
-    where: { instanciaEvolution: 'peru-exporta-francisco' },
+  // ─── Campaña MPX — flujo real de Cristina ─────────────────
+  const mpx = await prisma.campaign.upsert({
+    where: { slug: 'MPX' },
     update: {},
     create: {
-      tenantId: tenant.id,
-      nombre: 'Francisco',
-      passwordHash,
-      rol: 'VENDEDOR',
-      whatsappNumber: '51999999993',   // ← REEMPLAZAR con número real de Francisco
-      instanciaEvolution: 'peru-exporta-francisco'
-    }
-  })
-  console.log(`✅ Vendedor: ${francisco.nombre}`)
-
-  // ============================================
-  // FLUJOS BASE — los 6 flujos del sistema
-  // ============================================
-
-  // Flujo 1: Bienvenida
-  const flujoBienvenida = await prisma.flujo.upsert({
-    where: { id: 'flujo-bienvenida' },
-    update: {},
-    create: {
-      id: 'flujo-bienvenida',
-      tenantId: tenant.id,
-      nombre: 'bienvenida',
-      descripcion: 'Flujo principal de captura y calificación de leads',
-      activo: true
+      slug: 'MPX',
+      nombre: 'Mi Primera Exportación',
+      activa: true,
+      vendorId: cristina.id,
+      triggers: {
+        create: [
+          { texto: 'mi primera exportacion' },
+          { texto: 'mpx' },
+          { texto: 'primera expo' },
+          { texto: 'quiero exportar' },
+          { texto: 'informacion del curso' },
+        ]
+      },
+      steps: {
+        create: [
+          {
+            orden: 1,
+            tipo: 'MSG',
+            mensaje: `Hola 🙋🏽‍♀️ te saluda Perú Exporta TV 🇵🇪\n\nDéjame tu nombre y edad para poder brindarte mayor información\n¿Tienes algún producto en mente que te gustaría exportar o recién estás explorando? 👇`
+          },
+          {
+            orden: 2,
+            tipo: 'MSG',
+            mensaje: `Muchas gracias.\nPara orientarte mejor, coméntame:\n\n👉 ¿Ya tienes experiencia exportando o estás empezando desde cero?`
+          },
+          {
+            orden: 3,
+            tipo: 'MSG',
+            mensaje: `Genial 🙌 entonces este programa es justo para ti.\n\nMI PRIMERA EXPORTACIÓN está pensado para personas que nunca han exportado y quieren hacerlo de forma ordenada, sin improvisar.\n\n📆 Inicio: 14 de Abril 2026 · Duración 3 meses · Online\n⏰ 2 sesiones por semana: martes y jueves\n⏰ Horario: 8:30 pm – 10:00 pm\n📡 Transmisión vía Zoom (todas las sesiones son grabadas)\n\n🔥 Precio de apertura\n💰 INVERSIÓN: 1,500 soles\n\n¿Te gustaría conocer el temario completo?`
+          },
+          {
+            orden: 4,
+            tipo: 'NOTIFY',
+            mensaje: `🔔 Nuevo lead en MPX\n📱 Teléfono: {{telefono}}\n💬 Historial adjunto\n\nContactar hoy 👆`
+          },
+          {
+            orden: 5,
+            tipo: 'FOLLOWUP',
+            followupHrs: 2,
+            mensaje: `Hola 😊\nPara ayudarte mejor, coméntame:\n¿Tienes algún producto que te gustaría exportar o solo estás explorando la idea?`
+          }
+        ]
+      }
     }
   })
 
-  // Pasos del flujo bienvenida
-  await prisma.paso.upsert({
-    where: { id: 'paso-bienvenida-1' },
+  // ─── Campaña E1K ──────────────────────────────────────────
+  const e1k = await prisma.campaign.upsert({
+    where: { slug: 'E1K' },
     update: {},
     create: {
-      id: 'paso-bienvenida-1',
-      flujoId: flujoBienvenida.id,
-      orden: 1,
-      tipo: 'mensaje',
-      contenido: `Hola 🙋 te saluda Perú Exporta TV 🇵🇪\n\nNo necesitas tener producto propio para exportar — necesitas saber cómo. Formamos a productores, acopiadores, cooperativas y emprendedores para que exporten por su cuenta.\n\n¿Cómo te llamas y qué producto o rubro quieres exportar? 👇`
+      slug: 'E1K',
+      nombre: 'Exporta 1K',
+      activa: true,
+      vendorId: joan.id,
+      triggers: {
+        create: [
+          { texto: 'exporta 1k' },
+          { texto: 'e1k' },
+          { texto: 'mil dolares exportando' },
+        ]
+      },
+      steps: {
+        create: [
+          {
+            orden: 1,
+            tipo: 'MSG',
+            mensaje: `¡Hola! 👋 Te saluda Perú Exporta TV 🇵🇪\n\n¿Cuéntame, ya tienes experiencia exportando o estás empezando?`
+          },
+          {
+            orden: 2,
+            tipo: 'NOTIFY',
+            mensaje: `🔔 Nuevo lead en E1K\n📱 Teléfono: {{telefono}}\n\nContactar hoy 👆`
+          },
+          {
+            orden: 3,
+            tipo: 'FOLLOWUP',
+            followupHrs: 3,
+            mensaje: `Hola 😊 ¿Pudiste revisar la información sobre Exporta 1K?\n¿Tienes alguna consulta?`
+          }
+        ]
+      }
     }
   })
 
-  await prisma.paso.upsert({
-    where: { id: 'paso-bienvenida-2' },
+  // ─── Campaña CCI ──────────────────────────────────────────
+  const cci = await prisma.campaign.upsert({
+    where: { slug: 'CCI' },
     update: {},
     create: {
-      id: 'paso-bienvenida-2',
-      flujoId: flujoBienvenida.id,
-      orden: 2,
-      tipo: 'pregunta_botones',
-      contenido: '¿En qué etapa estás ahora mismo?',
-      botones: JSON.stringify([
-        { id: 'tipo_a_inicio', texto: '🌱 Estoy empezando desde cero' },
-        { id: 'tipo_b_producto', texto: '📦 Ya tengo producto o negocio' },
-        { id: 'tipo_b_vende', texto: '🚀 Ya vendo, quiero exportar' }
-      ]),
-      esperarRespuesta: true
+      slug: 'CCI',
+      nombre: 'Comercio Internacional',
+      activa: false,
+      vendorId: francisco.id,
+      triggers: {
+        create: [
+          { texto: 'comercio internacional' },
+          { texto: 'cci' },
+        ]
+      },
+      steps: {
+        create: [
+          {
+            orden: 1,
+            tipo: 'MSG',
+            mensaje: `Hola 🙋 te saluda Perú Exporta TV 🇵🇪\n\nBienvenido al Curso de Comercio Internacional.\n\n¿Cuéntame, cuál es tu objetivo principal?`
+          },
+          {
+            orden: 2,
+            tipo: 'NOTIFY',
+            mensaje: `🔔 Nuevo lead en CCI\n📱 Teléfono: {{telefono}}\n\nContactar hoy 👆`
+          }
+        ]
+      }
     }
   })
 
-  // Flujo 2: Reactivación 1 hora
-  const flujoReact1h = await prisma.flujo.upsert({
-    where: { id: 'flujo-reactivacion-1h' },
-    update: {},
-    create: {
-      id: 'flujo-reactivacion-1h',
-      tenantId: tenant.id,
-      nombre: 'reactivacion_1h',
-      descripcion: 'Se activa cuando el lead no responde en 1 hora',
-      activo: true
-    }
-  })
-
-  const pasoReact1h = await prisma.paso.upsert({
-    where: { id: 'paso-react-1h-1' },
-    update: {},
-    create: {
-      id: 'paso-react-1h-1',
-      flujoId: flujoReact1h.id,
-      orden: 1,
-      tipo: 'mensaje',
-      contenido: `Hola 👋 por si no viste nuestro mensaje — estamos aquí para ayudarte a dar el paso a la exportación.\n\n¿Pudiste ver la información? 😊`
-    }
-  })
-
-  await prisma.trigger.upsert({
-    where: { id: 'trigger-react-1h' },
-    update: {},
-    create: {
-      id: 'trigger-react-1h',
-      pasoId: pasoReact1h.id,
-      tipo: 'tiempo',
-      minutosEspera: 60
-    }
-  })
-
-  // Flujo 3: Reactivación 24 horas
-  const flujoReact24h = await prisma.flujo.upsert({
-    where: { id: 'flujo-reactivacion-24h' },
-    update: {},
-    create: {
-      id: 'flujo-reactivacion-24h',
-      tenantId: tenant.id,
-      nombre: 'reactivacion_24h',
-      descripcion: 'Segunda reactivación si sigue sin responder',
-      activo: true
-    }
-  })
-
-  const pasoReact24h = await prisma.paso.upsert({
-    where: { id: 'paso-react-24h-1' },
-    update: {},
-    create: {
-      id: 'paso-react-24h-1',
-      flujoId: flujoReact24h.id,
-      orden: 1,
-      tipo: 'mensaje',
-      contenido: `Hola, entendemos que estás ocupado 🙏\n\nSi en algún momento quieres saber cómo exportar tu producto, aquí estamos. 🇵🇪`
-    }
-  })
-
-  await prisma.trigger.upsert({
-    where: { id: 'trigger-react-24h' },
-    update: {},
-    create: {
-      id: 'trigger-react-24h',
-      pasoId: pasoReact24h.id,
-      tipo: 'tiempo',
-      minutosEspera: 1440
-    }
-  })
-
-  // Flujo 4: Objeción precio
-  const flujoObjecion = await prisma.flujo.upsert({
-    where: { id: 'flujo-objecion-precio' },
-    update: {},
-    create: {
-      id: 'flujo-objecion-precio',
-      tenantId: tenant.id,
-      nombre: 'objecion_precio',
-      descripcion: 'Se activa cuando el lead menciona precio o no tener dinero',
-      activo: true
-    }
-  })
-
-  const pasoObjecion = await prisma.paso.upsert({
-    where: { id: 'paso-objecion-1' },
-    update: {},
-    create: {
-      id: 'paso-objecion-1',
-      flujoId: flujoObjecion.id,
-      orden: 1,
-      tipo: 'mensaje',
-      contenido: `Entendemos 👋 Por eso queremos que primero conozcas bien qué incluye el programa — muchos de nuestros alumnos nos dijeron lo mismo y hoy ya están exportando. ¿Te cuento más?`
-    }
-  })
-
-  await prisma.trigger.upsert({
-    where: { id: 'trigger-objecion' },
-    update: {},
-    create: {
-      id: 'trigger-objecion',
-      pasoId: pasoObjecion.id,
-      tipo: 'keyword',
-      keywords: JSON.stringify(['caro', 'no tengo', 'precio', 'cuanto', 'costoso', 'no puedo', 'dinero'])
-    }
-  })
-
-  console.log('✅ Flujos base creados: bienvenida, reactivacion_1h, reactivacion_24h, objecion_precio')
-
-  // ============================================
-  // BOT CONFIG — Configuración inicial activa
-  // Los 7 mensajes que el motor usa en producción
-  // Editables desde la pantalla CRM
-  // ============================================
-  await prisma.botConfig.upsert({
-    where: { id: 'bot-config-peru-exporta' },
-    update: {},
-    create: {
-      id: 'bot-config-peru-exporta',
-      tenantId: tenant.id,
-      nombre: 'Configuración Principal Peru Exporta',
-      activo: true,
-      nombreEmpresa: 'Perú Exporta TV',
-      nombreProducto: 'Exporta con 1,000 Soles',
-      msgBienvenida:
-        'Hola 🙋 te saluda *Perú Exporta TV* 🇵🇪\n\n' +
-        'No necesitas tener producto propio para exportar — necesitas saber cómo.\n\n' +
-        'Formamos a productores, acopiadores y emprendedores para exportar por su cuenta.\n\n',
-      msgProducto:
-        'Perfecto 🙌 Con *{producto}* tienes mucho potencial.\n\n' +
-        '👉 *Curso Taller: EXPORTA CON 1,000 SOLES* 🌍\n' +
-        '📆 Sábados — Zoom (grabadas)\n' +
-        '💰 Precio regular: S/ 757\n' +
-        '🔥 Precio preventa: S/ 497\n\n' +
-        'Aprenderás a hacer tus primeras exportaciones con inversión mínima. 🚀',
-      msgExperiencia:
-        '¿ya tienes experiencia exportando o vas desde cero? 👇\n\n' +
-        '1️⃣ Ya exporté antes\n' +
-        '2️⃣ Voy desde cero',
-      msgPresentacion:
-        '📋 Aquí tienes el detalle completo del programa.\n\n' +
-        'Nuestros alumnos han hecho sus primeras exportaciones en 60 días. 🇵🇪',
-      msgObjecion:
-        'Entiendo 🙏 Por eso tenemos facilidades de pago.\n\n' +
-        '💳 *En 2 cuotas sin intereses:*\n' +
-        'Primera: S/ 257 hoy\n' +
-        'Segunda: S/ 240 en 2 semanas\n\n' +
-        '¿Te funciona esa opción? 👇',
-      msgUrgencia:
-        '⏰ *Solo por hoy* activamos un bono especial de S/ 40 de descuento.\n\n' +
-        'Escribe *PROMO* si quieres tomarlo 🔥\n\n' +
-        '(La oferta vence hoy a medianoche)',
-      msgHandoff:
-        'Un asesor de *Perú Exporta TV* se comunicará contigo muy pronto 📲\n' +
-        '¡Estate atento al teléfono!'
-    }
-  })
-  console.log('✅ BotConfig inicial creada y activa')
-  console.log('\n🎉 Seed completado exitosamente')
-  console.log('\n📋 Próximos pasos:')
-  console.log('   1. Configura las variables en .env')
-  console.log('   2. Ejecuta: npm run db:push')
-  console.log('   3. Ejecuta: npm run db:seed')
-  console.log('   4. Ejecuta: npm run dev')
-  console.log('   5. Configura el webhook en Evolution API → tu URL Railway /webhook')
+  console.log(`✅ Vendors: Joan (ADMIN), Cristina, Francisco`)
+  console.log(`✅ Campañas: MPX (${mpx.id}), E1K (${e1k.id}), CCI (${cci.id})`)
+  console.log(`🌱 Seed completo.`)
 }
 
 main()
-  .catch(console.error)
+  .catch(e => { console.error(e); process.exit(1) })
   .finally(() => prisma.$disconnect())
