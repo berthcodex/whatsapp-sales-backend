@@ -36,7 +36,8 @@ async function main() {
       nombre: 'Joan',
       email: 'albert.hidata@gmail.com',
       passwordHash,
-      rol: 'admin',
+      rol: 'ADMIN',
+      whatsappNumber: '51999999991',   // ← REEMPLAZAR con número real de Joan
       instanciaEvolution: 'peru-exporta-joan'
     }
   })
@@ -49,7 +50,8 @@ async function main() {
       tenantId: tenant.id,
       nombre: 'Cristina',
       passwordHash,
-      rol: 'vendedor',
+      rol: 'VENDEDOR',
+      whatsappNumber: '51999999992',   // ← REEMPLAZAR con número real de Cristina
       instanciaEvolution: 'peru-exporta-cristina'
     }
   })
@@ -62,7 +64,8 @@ async function main() {
       tenantId: tenant.id,
       nombre: 'Francisco',
       passwordHash,
-      rol: 'vendedor',
+      rol: 'VENDEDOR',
+      whatsappNumber: '51999999993',   // ← REEMPLAZAR con número real de Francisco
       instanciaEvolution: 'peru-exporta-francisco'
     }
   })
@@ -225,6 +228,56 @@ async function main() {
   })
 
   console.log('✅ Flujos base creados: bienvenida, reactivacion_1h, reactivacion_24h, objecion_precio')
+
+  // ============================================
+  // BOT CONFIG — Configuración inicial activa
+  // Los 7 mensajes que el motor usa en producción
+  // Editables desde la pantalla CRM
+  // ============================================
+  await prisma.botConfig.upsert({
+    where: { id: 'bot-config-peru-exporta' },
+    update: {},
+    create: {
+      id: 'bot-config-peru-exporta',
+      tenantId: tenant.id,
+      nombre: 'Configuración Principal Peru Exporta',
+      activo: true,
+      nombreEmpresa: 'Perú Exporta TV',
+      nombreProducto: 'Exporta con 1,000 Soles',
+      msgBienvenida:
+        'Hola 🙋 te saluda *Perú Exporta TV* 🇵🇪\n\n' +
+        'No necesitas tener producto propio para exportar — necesitas saber cómo.\n\n' +
+        'Formamos a productores, acopiadores y emprendedores para exportar por su cuenta.\n\n',
+      msgProducto:
+        'Perfecto 🙌 Con *{producto}* tienes mucho potencial.\n\n' +
+        '👉 *Curso Taller: EXPORTA CON 1,000 SOLES* 🌍\n' +
+        '📆 Sábados — Zoom (grabadas)\n' +
+        '💰 Precio regular: S/ 757\n' +
+        '🔥 Precio preventa: S/ 497\n\n' +
+        'Aprenderás a hacer tus primeras exportaciones con inversión mínima. 🚀',
+      msgExperiencia:
+        '¿ya tienes experiencia exportando o vas desde cero? 👇\n\n' +
+        '1️⃣ Ya exporté antes\n' +
+        '2️⃣ Voy desde cero',
+      msgPresentacion:
+        '📋 Aquí tienes el detalle completo del programa.\n\n' +
+        'Nuestros alumnos han hecho sus primeras exportaciones en 60 días. 🇵🇪',
+      msgObjecion:
+        'Entiendo 🙏 Por eso tenemos facilidades de pago.\n\n' +
+        '💳 *En 2 cuotas sin intereses:*\n' +
+        'Primera: S/ 257 hoy\n' +
+        'Segunda: S/ 240 en 2 semanas\n\n' +
+        '¿Te funciona esa opción? 👇',
+      msgUrgencia:
+        '⏰ *Solo por hoy* activamos un bono especial de S/ 40 de descuento.\n\n' +
+        'Escribe *PROMO* si quieres tomarlo 🔥\n\n' +
+        '(La oferta vence hoy a medianoche)',
+      msgHandoff:
+        'Un asesor de *Perú Exporta TV* se comunicará contigo muy pronto 📲\n' +
+        '¡Estate atento al teléfono!'
+    }
+  })
+  console.log('✅ BotConfig inicial creada y activa')
   console.log('\n🎉 Seed completado exitosamente')
   console.log('\n📋 Próximos pasos:')
   console.log('   1. Configura las variables en .env')
