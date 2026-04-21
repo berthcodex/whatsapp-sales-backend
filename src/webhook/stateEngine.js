@@ -739,6 +739,19 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
         }
 
         // Default: según tiempo transcurrido
+        // ANTI-LOOP: verificar cuándo fue la última respuesta del bot en HANDOFF
+        // Si respondimos hace menos de 15 minutos — no repetir el mismo mensaje
+        const ultimaRespuesta = await prisma.mensaje.findFirst({
+          where: { leadId: lead.id, direccion: 'SALIENTE', estadoBot: 'HANDOFF' },
+          orderBy: { enviadoEn: 'desc' }
+        })
+        const minutosDesdeUltimaRespuesta = ultimaRespuesta
+          ? Math.floor((Date.now() - new Date(ultimaRespuesta.enviadoEn).getTime()) / 60000)
+          : 999
+
+        // Si el bot respondió hace menos de 15 min — silencio total para no spamear
+        if (minutosDesdeUltimaRespuesta < 15) break
+
         let msgDefault
         let debeRenotificar = false
 
