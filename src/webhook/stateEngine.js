@@ -25,7 +25,8 @@ import {
   extraerNombre,
   extraerProducto,
   clasificarConScoring,
-  clasificarConIA
+  clasificarConIA,
+  detectarCursoCampana
 } from './classifier.js'
 
 import { enviarTexto } from '../whatsapp/sender.js'
@@ -315,6 +316,21 @@ export async function procesarConMotor({
 
   // ── 6. LEAD NUEVO ─────────────────────────────────────────────
   if (!lead) {
+    // Detectar si el primer mensaje menciona un curso de campaña.
+    // Esto diferencia al lead de Ad (ya sabe qué quiere) del orgánico.
+    const cursoCampana = detectarCursoCampana(texto)
+
+    // Si viene de campaña, prefijar el tipo según el curso detectado.
+    // El curso A → tipo A (formación). El curso B → tipo B (operador).
+    if (cursoCampana && !datosNuevos.tipo) {
+      datosNuevos.tipo = cursoCampana.curso
+      datosNuevos.tipoPreciso = cursoCampana.curso === 'B'
+        ? 'Tipo B — broker'
+        : 'Tipo A — formación'
+      datosNuevos.prioridad = 'ALTA'
+      datosNuevos.confianza = 'alta'
+    }
+
     lead = await prisma.lead.create({
       data: {
         tenantId,
@@ -329,7 +345,8 @@ export async function procesarConMotor({
         scoreA:          datosNuevos.scoreA || 0,
         clasificadoPorIA: datosNuevos.clasificadoPorIA || false,
         prioridad:       datosNuevos.prioridad || 'MEDIA',
-        estadoBot:       'BIENVENIDA',
+        // Si detectamos curso de campaña → arrancamos en PRESENTACION directo
+        estadoBot:       cursoCampana ? 'PRESENTACION' : 'BIENVENIDA',
         primerMensaje:   texto,
         ultimoTimestamp: new Date()
       }

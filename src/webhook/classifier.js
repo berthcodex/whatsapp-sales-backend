@@ -71,6 +71,65 @@ const KEYWORDS_TIPO_A = [
   { stem: "recien",      score: 5  }, // recién empezando
 ]
 
+// ============================================
+// CURSOS DE PERU EXPORTA — detección de campaña
+// Si el lead menciona esto en su PRIMER mensaje
+// → viene de un Ad → saltamos directo a PRESENTACION
+//
+// Curso A (formación básica):  "Exporta con 1,000 Soles"
+// Curso B (operadores):        "Contacta Compradores Internacionales"
+// ============================================
+
+export const CURSOS_PERU_EXPORTA = [
+  // ── Curso A: Exporta con 1,000 Soles ──────────────────────
+  { stem: 'exporta con 1',           curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'exporta con mil',         curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'exporta con 1000',        curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: '1000 soles',              curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: '1,000 soles',             curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'mil soles',               curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'exporta con poco',        curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'primera exportacion',     curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'primera exportación',     curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'mi primera exporta',      curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'curso basico',            curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'curso básico',            curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+  { stem: 'taller exporta',          curso: 'A', nombre: 'Exporta con 1,000 Soles' },
+
+  // ── Curso B: Contacta Compradores Internacionales ──────────
+  { stem: 'contacta compradores',    curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'compradores internacion', curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'contactar compradores',   curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'curso compradores',       curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'compradores reales',      curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'clientes internacion',    curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'curso avanzado',          curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+  { stem: 'contacta clientes',       curso: 'B', nombre: 'Contacta Compradores Internacionales' },
+]
+
+// Detecta si el primer mensaje menciona un curso específico.
+// Retorna { curso: 'A'|'B', nombre } o null si es lead orgánico.
+export function detectarCursoCampana(texto) {
+  const norm = texto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  for (const c of CURSOS_PERU_EXPORTA) {
+    const stemNorm = c.stem
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+    if (norm.includes(stemNorm)) {
+      return { curso: c.curso, nombre: c.nombre }
+    }
+  }
+  return null  // lead orgánico → flujo normal
+}
+
 // Productos de exportación peruana — con stems
 const PRODUCTOS_STEMS = [
   // Frutas
