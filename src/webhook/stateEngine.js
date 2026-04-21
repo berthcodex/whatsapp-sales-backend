@@ -617,6 +617,7 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
     // ──────────────────────────────────────────────────────────
     case 'HANDOFF': {
       console.log(`[Motor] Entrando a HANDOFF — número: ${numero} | texto: "${texto}"`)
+      console.log(`[Motor] handoffEn: ${lead.handoffEn} | minutosDesdeHandoff calculando...`)
       // ================================================================
       // HANDOFF INTELIGENTE — 6 casuísticas del lead que regresa
       //
@@ -628,11 +629,13 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
       const minutosDesdeHandoff = lead.handoffEn
         ? Math.floor((Date.now() - new Date(lead.handoffEn).getTime()) / 60000)
         : 999
+      console.log(`[Motor] minutosDesdeHandoff: ${minutosDesdeHandoff}`)
 
       // ── CASUÍSTICA 1: Lead manda voucher/imagen ───────────────────
       // Ya manejado antes en el flujo principal (tieneImagen)
       // No llega aquí — se intercepta antes.
 
+      console.log(`[Motor] Evaluando casuísticas HANDOFF...`)
       // ── CASUÍSTICA 2: Lead perdió interés ─────────────────────────
       const KEYWORDS_PERDIO_INTERES = [
         'ya no', 'no me interesa', 'gracias igual', 'dejalo',
