@@ -372,8 +372,8 @@ export async function procesarConMotor({
         scoreA:          datosNuevos.scoreA || 0,
         clasificadoPorIA: datosNuevos.clasificadoPorIA || false,
         prioridad:       datosNuevos.prioridad || 'MEDIA',
-        // Si detectamos curso de campaña → arrancamos en PRESENTACION directo
-        estadoBot:       cursoCampana ? 'PRESENTACION' : 'BIENVENIDA',
+        // Siempre arrancamos en BIENVENIDA — el flujo maneja el salto
+        estadoBot:       'BIENVENIDA',
         primerMensaje:   texto,
         ultimoTimestamp: new Date()
       }
