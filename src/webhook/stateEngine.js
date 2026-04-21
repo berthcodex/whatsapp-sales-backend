@@ -36,8 +36,10 @@ import { enviarTexto } from '../whatsapp/sender.js'
 // ================================================================
 
 // Señales de que el lead quiere hablar con humano YA
+// NOTA: 'llamame' y 'me llamen' no están aquí porque en HANDOFF
+// significan agendar hora — se manejan en las casuísticas de HANDOFF
 const KEYWORDS_HANDOFF_INMEDIATO = [
-  'hablar con', 'hablar a', 'me llamen', 'llamarme', 'llamame',
+  'hablar con', 'hablar a',
   'asesor', 'vendedor', 'persona', 'humano', 'quiero hablar',
   'precio final', 'descuento', 'oferta', 'promocion', 'promo'
 ]
