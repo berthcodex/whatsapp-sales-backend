@@ -230,14 +230,27 @@ async function notificarVendedor({ prisma, instancia, lead, vendedor }) {
     })
     if (!v?.whatsappNumber) return
 
+    const tiempoEnSistema = lead.creadoEn
+      ? Math.floor((Date.now() - new Date(lead.creadoEn).getTime()) / 60000)
+      : null
+    const tiempoStr = tiempoEnSistema !== null
+      ? tiempoEnSistema < 60
+        ? `${tiempoEnSistema} min`
+        : `${Math.floor(tiempoEnSistema / 60)}h ${tiempoEnSistema % 60}m`
+      : ''
+    const primerMsg = lead.primerMensaje
+      ? `"${lead.primerMensaje.slice(0, 80)}${lead.primerMensaje.length > 80 ? '...' : ''}"`
+      : null
     const msg =
-      `🔥 *LEAD CALIENTE — HANDOFF*\n\n` +
-      `👤 Nombre: ${lead.nombre || 'Sin nombre'}\n` +
-      `📱 Número: ${lead.numero}\n` +
-      `📦 Producto: ${lead.producto || 'Sin producto'}\n` +
-      `🎯 Tipo: ${lead.tipoPreciso || lead.tipo}\n` +
-      `⚡ Prioridad: ${lead.prioridad}\n\n` +
-      `El lead está listo. ¡Llama ahora! 📞`
+      `🔥 *LEAD CALIENTE — LISTO PARA LLAMAR*\n\n` +
+      `👤 *Nombre:* ${lead.nombre || 'Sin nombre'}\n` +
+      `📱 *Número:* ${lead.numero}\n` +
+      `📦 *Producto:* ${lead.producto || 'Sin producto'}\n` +
+      `🎯 *Perfil:* ${lead.tipoPreciso || lead.tipo}\n` +
+      `⚡ *Prioridad:* ${lead.prioridad}\n` +
+      (tiempoStr ? `⏱ *En sistema:* ${tiempoStr}\n` : '') +
+      (primerMsg ? `💬 *Dijo:* ${primerMsg}\n` : '') +
+      `\n📞 *¡Llama ahora antes de que se enfríe!*`
 
     await enviarTexto(instancia, v.whatsappNumber, msg)
   } catch (err) {
@@ -584,19 +597,224 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
 
     // ──────────────────────────────────────────────────────────
     case 'HANDOFF': {
-      // Lead ya está en HANDOFF — el vendedor maneja desde aquí.
-      // El bot solo confirma que lo atienden.
-      const msgHandoff = config?.msgHandoff ||
-        `Un asesor se comunicará contigo muy pronto 📲\n¡Estate atento al teléfono!`
+      // ================================================================
+      // HANDOFF INTELIGENTE — 6 casuísticas del lead que regresa
+      //
+      // El lead llegó a HANDOFF pero el vendedor no lo llamó todavía,
+      // o lo llamó y el lead volvió a escribir. El bot no puede ignorar
+      // estos mensajes — cada uno tiene una respuesta diferente.
+      // ================================================================
 
-      await enviarTexto(instancia, numero, msgHandoff)
+      const minutosDesdeHandoff = lead.handoffEn
+        ? Math.floor((Date.now() - new Date(lead.handoffEn).getTime()) / 60000)
+        : 999
+
+      // ── CASUÍSTICA 1: Lead manda voucher/imagen ───────────────────
+      // Ya manejado antes en el flujo principal (tieneImagen)
+      // No llega aquí — se intercepta antes.
+
+      // ── CASUÍSTICA 2: Lead perdió interés ─────────────────────────
+      const KEYWORDS_PERDIO_INTERES = [
+        'ya no', 'no me interesa', 'gracias igual', 'dejalo',
+        'olvídalo', 'olvidalo', 'no gracias', 'cancel', 'no quiero'
+      ]
+      if (contieneAlguna(texto, KEYWORDS_PERDIO_INTERES)) {
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: { resultado: 'perdido', ultimoTimestamp: new Date() }
+        })
+        const msg = `Entendido 🙏 No hay problema. Si en algún momento quieres retomar, aquí estaremos.
+
+¡Mucho éxito! 🇵🇪`
+        await enviarTexto(instancia, numero, msg)
+        await guardarMensaje(prisma, {
+          leadId: lead.id, tenantId, vendedorId: vendedor.id,
+          direccion: 'SALIENTE', contenido: msg, estadoBot: 'HANDOFF'
+        })
+        break
+      }
+
+      // ── CASUÍSTICA 3: Lead agenda hora específica ─────────────────
+      // Detecta horas como "8pm", "8:00pm", "las 3", "mañana", "tarde"
+      const KEYWORDS_HORA = [
+        'llámame a', 'llamame a', 'llama a las', 'a las', 'pm', 'am',
+        'mañana', 'manana', 'tarde', 'noche', 'después', 'despues',
+        'en la tarde', 'en la mañana', 'al rato', 'más tarde', 'mas tarde',
+        'en un momento', 'ahora no', 'no ahora', 'ahorita no'
+      ]
+      if (contieneAlguna(texto, KEYWORDS_HORA)) {
+        // Guardar la hora preferida en el resultado del lead
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: {
+            resultado: `hora_solicitada: ${texto.slice(0, 100)}`,
+            ultimoTimestamp: new Date()
+          }
+        })
+        // Confirmar al lead
+        const msg = `Perfecto 👍 Le aviso a tu asesor que te llame en ese horario.
+
+¡Estate pendiente al teléfono! 📲`
+        await enviarTexto(instancia, numero, msg)
+        await guardarMensaje(prisma, {
+          leadId: lead.id, tenantId, vendedorId: vendedor.id,
+          direccion: 'SALIENTE', contenido: msg, estadoBot: 'HANDOFF'
+        })
+        // Re-notificar al vendedor con la hora solicitada
+        await renotificarVendedor({
+          prisma, instancia, lead, vendedor,
+          motivo: `⏰ El lead pidió que lo llamen: "${texto.slice(0, 80)}"`
+        })
+        break
+      }
+
+      // ── CASUÍSTICA 4: Lead reclama que no lo llamaron ─────────────
+      const KEYWORDS_RECLAMO = [
+        'no me llamaron', 'nadie me llamó', 'nadie me llamo',
+        'no me han llamado', 'siguen sin llamar', 'todavía no',
+        'todavia no', 'cuándo me llaman', 'cuando me llaman',
+        'no me contactaron', 'esperando', 'llevo esperando'
+      ]
+      if (contieneAlguna(texto, KEYWORDS_RECLAMO)) {
+        const msg = `Mil disculpas 🙏 Eso no debería pasar.
+
+Ya le mandé una alerta urgente a tu asesor — te llama en los próximos minutos.
+
+¡Gracias por tu paciencia! 💪`
+        await enviarTexto(instancia, numero, msg)
+        await guardarMensaje(prisma, {
+          leadId: lead.id, tenantId, vendedorId: vendedor.id,
+          direccion: 'SALIENTE', contenido: msg, estadoBot: 'HANDOFF'
+        })
+        await renotificarVendedor({
+          prisma, instancia, lead, vendedor,
+          motivo: `🚨 URGENTE — El lead reclama que nadie lo llamó: "${texto.slice(0, 80)}"`
+        })
+        break
+      }
+
+      // ── CASUÍSTICA 5: Lead muestra interés renovado ───────────────
+      if (contieneAlguna(texto, KEYWORDS_INTERES_CONFIRMADO)) {
+        await renotificarVendedor({
+          prisma, instancia, lead, vendedor,
+          motivo: `🔥 Lead reconfirmó interés: "${texto.slice(0, 80)}"`
+        })
+        const msg = `¡Perfecto! 🙌 Ya avisé a tu asesor — te llama muy pronto.
+
+📲 ¡Estate atento!`
+        await enviarTexto(instancia, numero, msg)
+        await guardarMensaje(prisma, {
+          leadId: lead.id, tenantId, vendedorId: vendedor.id,
+          direccion: 'SALIENTE', contenido: msg, estadoBot: 'HANDOFF'
+        })
+        break
+      }
+
+      // ── CASUÍSTICA 6: Lead pregunta por precio u otra info ────────
+      if (contieneAlguna(texto, KEYWORDS_PRECIO)) {
+        const msg =
+          `El precio del programa es *S/ 497* en preventa 🔥
+
+` +
+          `💳 También puedes pagarlo en 2 cuotas:
+` +
+          `• Primera: S/ 257 hoy
+` +
+          `• Segunda: S/ 240 en 2 semanas
+
+` +
+          `Tu asesor te dará todos los detalles cuando te llame 📲`
+        await enviarTexto(instancia, numero, msg)
+        await guardarMensaje(prisma, {
+          leadId: lead.id, tenantId, vendedorId: vendedor.id,
+          direccion: 'SALIENTE', contenido: msg, estadoBot: 'HANDOFF'
+        })
+        break
+      }
+
+      // ── CASUÍSTICA DEFAULT: Lead escribe cualquier otra cosa ──────
+      // Lógica según tiempo transcurrido desde el handoff
+      let msgDefault
+      let debeRenotificar = false
+
+      if (minutosDesdeHandoff < 30) {
+        // Menos de 30 min — vendedor probablemente en camino
+        msgDefault = `Tu asesor ya está al tanto y te llama en breve 🙏
+
+¡Estate pendiente al teléfono! 📲`
+      } else if (minutosDesdeHandoff < 120) {
+        // 30 min a 2h — algo falló, re-notificar
+        msgDefault = `Disculpa la espera 🙏 Ya le recordé a tu asesor — te contacta hoy mismo.
+
+Si prefieres, dime a qué hora te viene mejor y coordino 👇`
+        debeRenotificar = true
+      } else if (minutosDesdeHandoff < 1440) {
+        // 2h a 24h — urgente
+        msgDefault = `Lamentamos la demora 😔 No es lo que queremos para ti.
+
+Ya escalé tu caso como *URGENTE* — un asesor te llama hoy.
+
+¿A qué hora te viene mejor? 👇`
+        debeRenotificar = true
+      } else {
+        // Más de 24h — lead frío, reactivar
+        msgDefault =
+          `¡Hola de nuevo! 👋 Nos alegra que vuelvas.
+
+` +
+          `Tenemos el programa *Exporta con 1,000 Soles* disponible ahora mismo.
+
+` +
+          `¿Sigues interesado/a? 👇`
+        // Reactivar el lead a PRESENTACION
+        await avanzarEstado(prisma, lead, 'PRESENTACION')
+        debeRenotificar = true
+      }
+
+      await enviarTexto(instancia, numero, msgDefault)
       await guardarMensaje(prisma, {
         leadId: lead.id, tenantId, vendedorId: vendedor.id,
-        direccion: 'SALIENTE', contenido: msgHandoff,
-        estadoBot: 'HANDOFF'
+        direccion: 'SALIENTE', contenido: msgDefault, estadoBot: 'HANDOFF'
       })
+
+      if (debeRenotificar) {
+        await renotificarVendedor({
+          prisma, instancia, lead, vendedor,
+          motivo: `⚠️ Lead inactivo ${minutosDesdeHandoff}min volvió a escribir: "${texto.slice(0, 80)}"`
+        })
+      }
       break
     }
+  }
+}
+
+// ================================================================
+// RE-NOTIFICAR VENDEDOR — cuando el lead vuelve a escribir en HANDOFF
+// Diferente a notificarVendedor — incluye el motivo específico
+// ================================================================
+async function renotificarVendedor({ prisma, instancia, lead, vendedor, motivo }) {
+  try {
+    const v = await prisma.vendedor.findUnique({ where: { id: vendedor.id } })
+    if (!v?.whatsappNumber) return
+
+    const msg =
+      `${motivo}
+
+` +
+      `👤 *Nombre:* ${lead.nombre || 'Sin nombre'}
+` +
+      `📱 *Número:* ${lead.numero}
+` +
+      `📦 *Producto:* ${lead.producto || 'Sin producto'}
+` +
+      `🎯 *Perfil:* ${lead.tipoPreciso || lead.tipo}
+
+` +
+      `📞 *Acción requerida — llama ahora*`
+
+    await enviarTexto(instancia, v.whatsappNumber, msg)
+  } catch (err) {
+    console.error('[StateEngine] Error re-notificando vendedor:', err.message)
   }
 }
 
