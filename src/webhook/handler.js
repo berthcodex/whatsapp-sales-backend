@@ -19,9 +19,12 @@ const mensajesProcesados = new Set()
 
 function yaFueProcesado(messageId) {
   if (!messageId) return false
-  if (mensajesProcesados.has(messageId)) return true
+  if (mensajesProcesados.has(messageId)) {
+    console.log(`[Handler] Duplicado ignorado: ${messageId}`)
+    return true
+  }
   mensajesProcesados.add(messageId)
-  if (mensajesProcesados.size > 1000) mensajesProcesados.clear()
+  if (mensajesProcesados.size > 500) mensajesProcesados.clear()
   return false
 }
 
