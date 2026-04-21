@@ -12,6 +12,15 @@ import {
   getReportes
 } from './api/leads.js'
 
+import {
+  getBotConfig,
+  updateBotConfig,
+  getVendedores,
+  createVendedor,
+  updateVendedor,
+  desactivarVendedor
+} from './api/config.js'
+
 const prisma = new PrismaClient({
   log: process.env.NODE_ENV === 'development' ? ['error'] : ['error']
 })
@@ -63,6 +72,32 @@ app.post('/leads/:id/accion', async (request, reply) => {
 
 app.get('/reportes', async (request, reply) => {
   return getReportes(request, reply, prisma)
+})
+
+// ── Config — Bot ─────────────────────────────────────────────
+app.get('/config/bot', async (request, reply) => {
+  return getBotConfig(request, reply, prisma)
+})
+
+app.put('/config/bot', async (request, reply) => {
+  return updateBotConfig(request, reply, prisma)
+})
+
+// ── Config — Vendedores ──────────────────────────────────────
+app.get('/config/vendedores', async (request, reply) => {
+  return getVendedores(request, reply, prisma)
+})
+
+app.post('/config/vendedores', async (request, reply) => {
+  return createVendedor(request, reply, prisma)
+})
+
+app.put('/config/vendedores/:id', async (request, reply) => {
+  return updateVendedor(request, reply, prisma)
+})
+
+app.put('/config/vendedores/:id/desactivar', async (request, reply) => {
+  return desactivarVendedor(request, reply, prisma)
 })
 
 const PORT = parseInt(process.env.PORT || '3000')
