@@ -122,6 +122,7 @@ model Lead {
 
   // Tracking
   primerMensaje   String?
+  cursoInteres    String?  // slug del curso detectado desde el Ad: 'MPX', 'E1K', etc.
   ultimoTimestamp DateTime?
 
   // Fechas
