@@ -499,7 +499,7 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
     // ──────────────────────────────────────────────────────────
     case 'EXPERIENCIA': {
       // Solo detectar respuesta si el lead ya recibió la pregunta.
-      // Si no hay mensajes SALIENTES en estado EXPERIENCIA → es el primer
+      // Si no hay mensajes SALIENTES en estado EXPERIENCIA es el primer
       // mensaje del lead (o del Ad) y NO debe interpretarse como respuesta.
       const mensajesSalientes = await prisma.mensaje.count({
         where: { leadId: lead.id, direccion: 'SALIENTE', estadoBot: 'EXPERIENCIA' }
@@ -507,27 +507,18 @@ async function ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vende
       const esPrimerMensaje = mensajesSalientes === 0
 
       const yaExporto = !esPrimerMensaje && (contieneAlguna(texto, [
-        'ya exporté', 'ya exporto', 'tengo experiencia', 'si he exportado',
-        'exporto actualmente', 'ya exporté antes', 'exporté antes',
-        '1️⃣', 'opcion 1', 'opción 1', 'numero 1', 'número 1'
+        'ya exporte', 'ya exporto', 'tengo experiencia', 'si he exportado',
+        'exporto actualmente', 'exporte antes',
+        'opcion 1', 'opcion 1', 'numero 1', 'numero 1'
       ]) || norm(texto).trim() === '1')
 
       const desdesCero = !esPrimerMensaje && (contieneAlguna(texto, [
         'desde cero', 'sin experiencia', 'no he exportado', 'nunca he exportado',
-        'primera vez', 'recién empezando', 'no tengo experiencia',
-        '2️⃣', 'opcion 2', 'opción 2', 'numero 2', 'número 2'
+        'primera vez', 'recien empezando', 'no tengo experiencia',
+        'opcion 2', 'opcion 2', 'numero 2', 'numero 2'
       ]) || norm(texto).trim() === '2')
 
       if (yaExporto || desdesCero) {
-        await avanzarEstado(prisma, lead, 'PRESENTACION')
-        lead.estadoBot = 'PRESENTACION'
-        await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
-        return
-      }pción 2', 'numero 2', 'número 2'
-      ]) || norm(texto).trim() === '2'
-
-      if (yaExporto || desdesCero) {
-        // El lead respondió explícitamente sobre su experiencia → ir a PRESENTACION
         await avanzarEstado(prisma, lead, 'PRESENTACION')
         lead.estadoBot = 'PRESENTACION'
         await ejecutarEstado({ prisma, instancia, numero, lead, tenantId, vendedor, datosNuevos, texto })
