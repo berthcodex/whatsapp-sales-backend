@@ -43,10 +43,22 @@ async function escribirEnSheets({ telefono, msgInicial, mensajes, nombre, produc
   if (!url) { console.log('[Sheets] SHEETS_WEBHOOK_URL no configurada'); return }
   console.log('[Sheets] Enviando a:', url.slice(0, 60))
   try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accion, telefono, msgInicial, mensajes, nombre, producto, perfil, prioridad, estado, vendedor, campana }),
+    // Enviar como GET con query params — única forma confiable con Apps Script
+    const params = new URLSearchParams({
+      accion:     accion     || 'nuevo',
+      telefono:   telefono   || '',
+      msgInicial: (msgInicial|| '').slice(0, 200),
+      mensajes:   (mensajes  || '').slice(0, 500),
+      nombre:     nombre     || '',
+      producto:   producto   || '',
+      perfil:     perfil     || '',
+      prioridad:  prioridad  || '',
+      estado:     estado     || '',
+      vendedor:   vendedor   || '',
+      campana:    campana    || ''
+    })
+    await fetch(`${url}?${params.toString()}`, {
+      method: 'GET',
       redirect: 'follow',
       signal: AbortSignal.timeout(8000)
     })
