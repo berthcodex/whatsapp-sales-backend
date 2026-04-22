@@ -14,12 +14,11 @@ model Vendor {
   telefono             String     @unique
   role                 Role       @default(VENDOR)
   activo               Boolean    @default(true)
-  // Sprint 3: campos para routing de webhook y auth
-  instanciaEvolution   String?    // "peru-exporta-test" — mapea el webhook al vendedor
-  whatsappNumber       String?    @unique // número para notificaciones al vendedor
-  pin                  String?    @default("0000") // PIN 4 dígitos para login CRM
+  instanciaEvolution   String?
+  whatsappNumber       String?    @unique
+  pin                  String?    @default("0000")
   campaigns            Campaign[]
-  leads                Lead[]     // leads directamente asignados
+  leads                Lead[]
   createdAt            DateTime   @default(now())
   updatedAt            DateTime   @updatedAt
 
@@ -34,7 +33,7 @@ enum Role {
 // ─── Campañas ─────────────────────────────────────────────────
 model Campaign {
   id        Int        @id @default(autoincrement())
-  slug      String     @unique  // MPX, E1K, CCI
+  slug      String     @unique
   nombre    String
   activa    Boolean    @default(true)
   vendorId  Int
@@ -48,7 +47,7 @@ model Campaign {
   @@map("campaigns")
 }
 
-// ─── Triggers (mensajes del ad que activan la campaña) ─────────
+// ─── Triggers ─────────────────────────────────────────────────
 model Trigger {
   id         Int      @id @default(autoincrement())
   texto      String
@@ -60,40 +59,41 @@ model Trigger {
 
 // ─── Pasos del flujo ──────────────────────────────────────────
 model FlowStep {
-  id           Int      @id @default(autoincrement())
-  orden        Int
-  tipo         StepType // MSG | FOLLOWUP | NOTIFY
-  mensaje      String   @db.Text
-  followupHrs  Int?     // solo si tipo=FOLLOWUP: horas de espera sin respuesta
-  campaignId   Int
-  campaign     Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  id          Int      @id @default(autoincrement())
+  orden       Int
+  tipo        StepType
+  mensaje     String   @db.Text
+  followupHrs Int?
+  campaignId  Int
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@unique([campaignId, orden])
   @@map("flow_steps")
 }
 
 enum StepType {
-  MSG       // mensaje secuencial al lead
-  FOLLOWUP  // si el lead no responde en X horas
-  NOTIFY    // notifica al vendedor con historial
+  MSG
+  FOLLOWUP
+  NOTIFY
 }
 
 // ─── Leads ────────────────────────────────────────────────────
 model Lead {
-  id           Int          @id @default(autoincrement())
-  telefono     String       @unique
-  campaignId   Int?
-  campaign     Campaign?    @relation(fields: [campaignId], references: [id])
-  // Sprint 3: FK directo para filtrado eficiente por vendedor
-  vendorId     Int?
-  vendor       Vendor?      @relation(fields: [vendorId], references: [id])
-  pasoActual   Int          @default(0)  // índice del paso donde está el lead
-  ultimoMensaje DateTime?                // cuándo respondió por última vez
-  notificado   Boolean      @default(false)
-  estado       LeadEstado   @default(NUEVO)
-  mensajes     Message[]
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  id                Int        @id @default(autoincrement())
+  telefono          String     @unique
+  campaignId        Int?
+  campaign          Campaign?  @relation(fields: [campaignId], references: [id])
+  vendorId          Int?
+  vendor            Vendor?    @relation(fields: [vendorId], references: [id])
+  pasoActual        Int        @default(0)
+  ultimoMensaje     DateTime?
+  notificado        Boolean    @default(false)
+  estado            LeadEstado @default(NUEVO)
+  nombreDetectado   String?
+  productoDetectado String?
+  mensajes          Message[]
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
 
   @@map("leads")
 }
@@ -107,18 +107,13 @@ enum LeadEstado {
 
 // ─── Historial de mensajes ────────────────────────────────────
 model Message {
-  id        Int         @id @default(autoincrement())
+  id        Int      @id @default(autoincrement())
   leadId    Int
-  lead      Lead        @relation(fields: [leadId], references: [id])
-  origen    MsgOrigen   // LEAD | BOT | VENDEDOR
-  texto     String      @db.Text
-  createdAt DateTime    @default(now())
+  lead      Lead     @relation(fields: [leadId], references: [id])
+  origen    String   // LEAD | BOT | VENDEDOR — TEXT en DB
+  texto     String   @db.Text
+  createdAt DateTime @default(now())
 
   @@map("messages")
 }
 
-enum MsgOrigen {
-  LEAD
-  BOT
-  VENDEDOR
-}
