@@ -46,7 +46,8 @@ async function escribirEnSheets({ telefono, msgInicial, mensajes, nombre, produc
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accion, telefono, msgInicial, mensajes, nombre, producto, perfil, prioridad, estado, vendedor, campana }),
-      signal: AbortSignal.timeout(5000)
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000)
     })
   } catch (err) {
     console.error('[Sheets] Error escribiendo:', err.message)
