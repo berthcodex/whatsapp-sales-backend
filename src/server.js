@@ -35,6 +35,7 @@ import {
 } from './routes/campaigns.js'
 // Sprint 3: auth con PIN
 import { loginVendor, getVendorNames } from './routes/auth.js'
+import { ejecutarFollowup } from './motor/followupEngine.js'
 
 const prisma = new PrismaClient({
   log: process.env.NODE_ENV === 'development' ? ['error'] : ['error']
@@ -137,4 +138,21 @@ process.on('SIGTERM', async () => {
   await app.close()
   await prisma.$disconnect()
   process.exit(0)
+})
+
+// ── Cron endpoint — llamado por cron-job.org cada minuto ─────
+// Protegido con CRON_SECRET para evitar llamadas no autorizadas
+app.get('/cron/followup', async (req, reply) => {
+  const secret = req.headers['x-cron-secret'] || req.query.secret
+  if (secret !== process.env.CRON_SECRET) {
+    return reply.status(401).send({ error: 'Unauthorized' })
+  }
+  try {
+    const result = await ejecutarFollowup(prisma)
+    console.log(`[Cron] Followup ejecutado: ${result.procesados} leads`)
+    return reply.send({ ok: true, ...result })
+  } catch (err) {
+    console.error('[Cron] Error:', err.message)
+    return reply.status(500).send({ error: err.message })
+  }
 })
