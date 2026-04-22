@@ -36,6 +36,23 @@ import {
   clasificarConIA
 } from '../webhook/classifier.js'
 
+
+// ── Mirror a Google Sheets ───────────────────────────────────
+async function escribirEnSheets({ telefono, msgInicial, mensajes, nombre, producto, perfil, prioridad, estado, vendedor, campana, accion = 'nuevo' }) {
+  const url = process.env.SHEETS_WEBHOOK_URL
+  if (!url) return
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accion, telefono, msgInicial, mensajes, nombre, producto, perfil, prioridad, estado, vendedor, campana }),
+      signal: AbortSignal.timeout(5000)
+    })
+  } catch (err) {
+    console.error('[Sheets] Error escribiendo:', err.message)
+  }
+}
+
 const SEG_SILENCIO       = 20
 const MIN_ALERTA_VENDOR  = 30
 const MIN_REACTIVA_1     = 60
@@ -232,6 +249,23 @@ export async function ejecutarFollowup(prisma) {
           `\n⚡ ${clasif.prioridad === 'URGENTE' ? '¡Llama AHORA!' : 'Llama hoy'}`
         await enviarVendedor(instancia, vendor.whatsappNumber, msgVendedor)
       }
+
+      // Mirror a Google Sheets
+      const mensajesTexto = mensajes.map(m => m.texto).join(' | ')
+      const msgInicial = mensajes[0]?.texto || ''
+      await escribirEnSheets({
+        accion:    'nuevo',
+        telefono:  lead.telefono,
+        msgInicial,
+        mensajes:  mensajesTexto,
+        nombre:    clasif.nombre   || '',
+        producto:  clasif.producto || '',
+        perfil:    clasif.tipoPreciso,
+        prioridad: clasif.prioridad,
+        estado:    'pendiente llamar',
+        vendedor:  vendor?.nombre  || '',
+        campana:   campaign?.nombre|| ''
+      })
 
       // Marcar como NOTIFICADO
       await prisma.lead.update({
