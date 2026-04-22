@@ -42,10 +42,23 @@ async function escribirEnSheets({ telefono, msgInicial, mensajes, nombre, produc
   const url = process.env.SHEETS_WEBHOOK_URL
   if (!url) return
   try {
+    // Google Apps Script requiere form-urlencoded, no JSON
+    const params = new URLSearchParams({
+      accion, telefono,
+      msgInicial: msgInicial || '',
+      mensajes:   mensajes   || '',
+      nombre:     nombre     || '',
+      producto:   producto   || '',
+      perfil:     perfil     || '',
+      prioridad:  prioridad  || '',
+      estado:     estado     || '',
+      vendedor:   vendedor   || '',
+      campana:    campana    || ''
+    })
     await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accion, telefono, msgInicial, mensajes, nombre, producto, perfil, prioridad, estado, vendedor, campana }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
       redirect: 'follow',
       signal: AbortSignal.timeout(8000)
     })
