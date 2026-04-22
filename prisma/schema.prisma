@@ -9,25 +9,20 @@ datasource db {
 
 // ─── Vendedores ───────────────────────────────────────────────
 model Vendor {
-  id                   Int        @id @default(autoincrement())
-  nombre               String
-  telefono             String     @unique
-  role                 Role       @default(VENDOR)
-  activo               Boolean    @default(true)
-  instanciaEvolution   String?
-  whatsappNumber       String?    @unique
-  pin                  String?    @default("0000")
-  campaigns            Campaign[]
-  leads                Lead[]
-  createdAt            DateTime   @default(now())
-  updatedAt            DateTime   @updatedAt
+  id                 Int        @id @default(autoincrement())
+  nombre             String
+  telefono           String     @unique
+  role               String     @default("VENDOR")
+  activo             Boolean    @default(true)
+  instanciaEvolution String?
+  whatsappNumber     String?    @unique
+  pin                String?    @default("0000")
+  campaigns          Campaign[]
+  leads              Lead[]
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
 
   @@map("vendors")
-}
-
-enum Role {
-  ADMIN
-  VENDOR
 }
 
 // ─── Campañas ─────────────────────────────────────────────────
@@ -61,7 +56,7 @@ model Trigger {
 model FlowStep {
   id          Int      @id @default(autoincrement())
   orden       Int
-  tipo        StepType
+  tipo        String   // MSG | FOLLOWUP | NOTIFY
   mensaje     String   @db.Text
   followupHrs Int?
   campaignId  Int
@@ -71,38 +66,25 @@ model FlowStep {
   @@map("flow_steps")
 }
 
-enum StepType {
-  MSG
-  FOLLOWUP
-  NOTIFY
-}
-
 // ─── Leads ────────────────────────────────────────────────────
 model Lead {
-  id                Int        @id @default(autoincrement())
-  telefono          String     @unique
+  id                Int       @id @default(autoincrement())
+  telefono          String    @unique
   campaignId        Int?
-  campaign          Campaign?  @relation(fields: [campaignId], references: [id])
+  campaign          Campaign? @relation(fields: [campaignId], references: [id])
   vendorId          Int?
-  vendor            Vendor?    @relation(fields: [vendorId], references: [id])
-  pasoActual        Int        @default(0)
+  vendor            Vendor?   @relation(fields: [vendorId], references: [id])
+  pasoActual        Int       @default(0)
   ultimoMensaje     DateTime?
-  notificado        Boolean    @default(false)
-  estado            LeadEstado @default(NUEVO)
+  notificado        Boolean   @default(false)
+  estado            String    @default("NUEVO")
   nombreDetectado   String?
   productoDetectado String?
   mensajes          Message[]
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   @@map("leads")
-}
-
-enum LeadEstado {
-  NUEVO
-  EN_FLUJO
-  NOTIFICADO
-  CERRADO
 }
 
 // ─── Historial de mensajes ────────────────────────────────────
@@ -110,10 +92,9 @@ model Message {
   id        Int      @id @default(autoincrement())
   leadId    Int
   lead      Lead     @relation(fields: [leadId], references: [id])
-  origen    String   // LEAD | BOT | VENDEDOR — TEXT en DB
+  origen    String   // LEAD | BOT | VENDEDOR
   texto     String   @db.Text
   createdAt DateTime @default(now())
 
   @@map("messages")
 }
-
