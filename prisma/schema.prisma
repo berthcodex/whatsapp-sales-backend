@@ -9,14 +9,19 @@ datasource db {
 
 // ─── Vendedores ───────────────────────────────────────────────
 model Vendor {
-  id        Int        @id @default(autoincrement())
-  nombre    String
-  telefono  String     @unique
-  role      Role       @default(VENDOR)
-  activo    Boolean    @default(true)
-  campaigns Campaign[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id                   Int        @id @default(autoincrement())
+  nombre               String
+  telefono             String     @unique
+  role                 Role       @default(VENDOR)
+  activo               Boolean    @default(true)
+  // Sprint 3: campos para routing de webhook y auth
+  instanciaEvolution   String?    // "peru-exporta-test" — mapea el webhook al vendedor
+  whatsappNumber       String?    @unique // número para notificaciones al vendedor
+  pin                  String?    @default("0000") // PIN 4 dígitos para login CRM
+  campaigns            Campaign[]
+  leads                Lead[]     // leads directamente asignados
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
 
   @@map("vendors")
 }
@@ -79,6 +84,9 @@ model Lead {
   telefono     String       @unique
   campaignId   Int?
   campaign     Campaign?    @relation(fields: [campaignId], references: [id])
+  // Sprint 3: FK directo para filtrado eficiente por vendedor
+  vendorId     Int?
+  vendor       Vendor?      @relation(fields: [vendorId], references: [id])
   pasoActual   Int          @default(0)  // índice del paso donde está el lead
   ultimoMensaje DateTime?                // cuándo respondió por última vez
   notificado   Boolean      @default(false)
