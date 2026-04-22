@@ -92,7 +92,7 @@ export async function deleteCampaign(req, reply, prisma) {
   return { ok: true }
 }
 
-// PUT /campaigns/:id/steps — reemplaza todos los pasos
+// PUT /campaigns/:id/steps
 export async function saveSteps(req, reply, prisma) {
   const campaignId = Number(req.params.id)
   const { steps } = req.body
@@ -159,4 +159,31 @@ export async function testTrigger(req, reply, prisma) {
     trigger: matched?.texto || null,
     campaign: matched ? { slug: campaign.slug, nombre: campaign.nombre } : null
   }
+}
+
+// Sprint 3 Bug 4: activar campaña exclusiva en producción
+// Pausa todas las campañas del mismo vendedor y activa solo la seleccionada
+export async function activarCampaign(req, reply, prisma) {
+  const campaignId = Number(req.params.id)
+
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } })
+  if (!campaign) return reply.code(404).send({ error: 'Campaña no encontrada' })
+
+  await prisma.$transaction([
+    prisma.campaign.updateMany({
+      where: { vendorId: campaign.vendorId },
+      data: { activa: false }
+    }),
+    prisma.campaign.update({
+      where: { id: campaignId },
+      data: { activa: true }
+    })
+  ])
+
+  const updated = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: { vendor: true, steps: { orderBy: { orden: 'asc' } }, triggers: true }
+  })
+
+  return updated
 }
