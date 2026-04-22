@@ -1,40 +1,29 @@
 // src/webhook/stateEngine.js
-// HIDATA — Motor Sprint 3.3
+// HIDATA — Motor Sprint 3.4 — DISEÑO CORRECTO
 //
-// ARQUITECTURA CORRECTA:
-// El handler.js ya tiene debounce de 3 segundos por número.
-// Esto significa que si el lead manda 3 mensajes en 3 segundos,
-// el motor solo se ejecuta UNA vez con el último mensaje.
+// FILOSOFÍA: Simple beats complex. Siempre.
 //
-// FLUJO POR PASOS:
-// - Lead nuevo     → paso 1 MSG → parar y esperar
-// - Lead responde  → siguiente paso MSG → parar y esperar
-// - Último paso    → silencio (vendedor ya notificado)
+// DOS FASES SOLAMENTE:
 //
-// MENSAJE FINAL AL COMPLETAR EL FLUJO:
-// Cuando el lead responde al último paso MSG, en vez de silencio
-// enviamos: "Perfecto! Un asesor se comunicará contigo hoy. Estamos en contacto!"
+// FASE 1 — NUEVO: Lead llega → bot saluda con pregunta abierta → espera
+// FASE 2 — EN_FLUJO: Lead responde → bot acumula en silencio → 
+//           después de 15s sin respuesta → bot cierra → notifica vendedor
+//
+// El debounce de 3s del handler.js filtra múltiples enters rápidos.
+// El cooldown de 15s del stateEngine filtra pausas entre mensajes.
+// Juntos garantizan que el bot solo responde cuando el lead terminó de escribir.
 
 import { detectarCursoCampana } from './classifier.js'
 import { enviarTexto } from '../whatsapp/sender.js'
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
+// ── Cooldown map — número → timestamp del último mensaje ─────
+// Persiste en memoria del proceso (se resetea si Render reinicia)
+// Suficiente para el caso de uso — 45 leads/día
+const ultimoMensajeMap = new Map()
+
 // ── Helpers DB ───────────────────────────────────────────────
-
-async function getCampaignConSteps(prisma, slug) {
-  return await prisma.campaign.findUnique({
-    where: { slug },
-    include: { steps: { orderBy: { orden: 'asc' } }, vendor: true }
-  })
-}
-
-async function getCampaignActiva(prisma) {
-  return await prisma.campaign.findFirst({
-    where: { activa: true },
-    include: { steps: { orderBy: { orden: 'asc' } }, vendor: true }
-  })
-}
 
 async function guardarMensaje(prisma, { leadId, direccion, texto }) {
   try {
@@ -46,86 +35,87 @@ async function guardarMensaje(prisma, { leadId, direccion, texto }) {
   }
 }
 
-function interpolar(mensaje, lead, vendor) {
-  return (mensaje || '')
-    .replace(/\{\{telefono\}\}/g, lead.telefono || '')
-    .replace(/\{\{nombre\}\}/g,   lead.telefono || '')
-    .replace(/\{\{vendedor\}\}/g, vendor?.nombre || '')
-    .replace(/\{\{curso\}\}/g,    'Mi Primera Exportación')
-}
-
-// ── Enviar paso MSG al lead ──────────────────────────────────
-async function enviarPasoMsg({ prisma, instancia, numero, lead, vendor, step }) {
-  const texto = interpolar(step.mensaje, lead, vendor)
-  await sleep(1000)
-  await enviarTexto(instancia, numero, texto)
-  await guardarMensaje(prisma, { leadId: lead.id, direccion: 'SALIENTE', texto })
-  await prisma.lead.update({
-    where: { id: lead.id },
-    data: { pasoActual: step.orden, estado: 'EN_FLUJO' }
-  })
-}
-
-// ── Ejecutar NOTIFYs después de un paso MSG ─────────────────
-// El NOTIFY va al vendedor — no interrumpe el flujo del lead
-async function ejecutarNotifys({ prisma, instancia, lead, vendor, campaign, stepEjecutado }) {
-  try {
-    if (!vendor?.whatsappNumber) return
-    const idxActual = campaign.steps.findIndex(s => s.id === stepEjecutado.id)
-    const siguientes = campaign.steps.slice(idxActual + 1)
-    for (const step of siguientes) {
-      if (step.tipo === 'NOTIFY') {
-        const texto = interpolar(step.mensaje, lead, vendor)
-        await enviarTexto(instancia, vendor.whatsappNumber, texto)
-      } else {
-        break // parar al primer MSG o FOLLOWUP
-      }
-    }
-  } catch (err) {
-    console.error('[Motor] Error en NOTIFY:', err.message)
+async function getCampaignActiva(prisma, slug) {
+  if (slug) {
+    const c = await prisma.campaign.findUnique({
+      where: { slug },
+      include: { vendor: true }
+    })
+    if (c) return c
   }
-}
-
-// ── Mensaje de cierre al completar el flujo ──────────────────
-async function enviarMensajeCierre({ prisma, instancia, numero, lead }) {
-  const msg =
-    `Perfecto, gracias por contarnos! 🙌\n\n` +
-    `Un asesor de nuestro equipo se comunicará contigo hoy para explicarte exactamente cómo podemos ayudarte.\n\n` +
-    `Estamos en contacto!`
-  await sleep(1000)
-  await enviarTexto(instancia, numero, msg)
-  await guardarMensaje(prisma, { leadId: lead.id, direccion: 'SALIENTE', texto: msg })
-  await prisma.lead.update({
-    where: { id: lead.id },
-    data: { estado: 'NOTIFICADO' }
+  return await prisma.campaign.findFirst({
+    where: { activa: true },
+    include: { vendor: true }
   })
 }
 
-// ── Notificación genérica al vendedor ───────────────────────
-async function notificarVendedorGenerico({ prisma, instancia, lead, vendor, campaignSlug }) {
+// ── Mensaje de bienvenida desde FlowBuilder ──────────────────
+async function getMsgBienvenida(prisma, campaignId) {
+  if (!campaignId) return null
+  const steps = await prisma.flowStep.findMany({
+    where: { campaignId, tipo: 'MSG' },
+    orderBy: { orden: 'asc' },
+    take: 1
+  })
+  return steps[0]?.mensaje || null
+}
+
+// ── Notificar vendedor con historial completo ────────────────
+async function notificarVendedor({ prisma, instancia, lead, vendor, campaignSlug }) {
   try {
-    if (!vendor?.whatsappNumber) return
+    if (!vendor?.whatsappNumber) {
+      console.warn('[Motor] vendor sin whatsappNumber')
+      return
+    }
+
     const mensajes = await prisma.message.findMany({
       where: { leadId: lead.id, origen: 'LEAD' },
-      orderBy: { createdAt: 'asc' },
-      take: 5
+      orderBy: { createdAt: 'asc' }
     })
-    const historial = mensajes.map(m => `  > "${m.texto.slice(0, 80)}"`).join('\n')
+
+    const historial = mensajes
+      .map(m => `  > "${m.texto.slice(0, 100)}"`)
+      .join('\n')
+
     const msg =
-      `🔔 NUEVO LEAD — LLAMA AHORA\n\n` +
+      `🔔 LEAD LISTO — LLAMA AHORA\n\n` +
       `📱 wa.me/${lead.telefono}\n` +
       `📚 Curso: ${campaignSlug || 'orgánico'}\n` +
-      (historial ? `\n💬 Dijo:\n${historial}\n` : '') +
+      (historial ? `\n💬 Lo que dijo:\n${historial}\n` : '') +
       `\n⚡ Llama antes de que se enfríe!`
+
     await enviarTexto(instancia, vendor.whatsappNumber, msg)
   } catch (err) {
     console.error('[Motor] Error notificando vendedor:', err.message)
   }
 }
 
+// ── Cerrar flujo: mensaje al lead + notificación al vendedor ─
+async function cerrarFlujo({ prisma, instancia, numero, lead, vendor, campaignSlug }) {
+  const msgCierre =
+    `Perfecto, gracias por contarnos! 🙌\n\n` +
+    `Un asesor de nuestro equipo se comunicará contigo hoy para explicarte exactamente cómo podemos ayudarte.\n\n` +
+    `¡Estamos en contacto!`
+
+  await sleep(1000)
+  await enviarTexto(instancia, numero, msgCierre)
+  await guardarMensaje(prisma, { leadId: lead.id, direccion: 'SALIENTE', texto: msgCierre })
+
+  await prisma.lead.update({
+    where: { id: lead.id },
+    data: { estado: 'NOTIFICADO', pasoActual: 99 }
+  })
+
+  await notificarVendedor({ prisma, instancia, lead, vendor, campaignSlug })
+  
+  // Limpiar del cooldown map
+  ultimoMensajeMap.delete(numero)
+}
+
 // ── MOTOR PRINCIPAL ──────────────────────────────────────────
 export async function procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor }) {
   try {
+    const ahora = Date.now()
     let lead = await prisma.lead.findUnique({ where: { telefono: numero } })
 
     // ════════════════════════════════════════════════════════
@@ -138,7 +128,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         texto: texto || '[imagen]'
       })
 
-      // Imagen → posible comprobante de pago
+      // Imagen → posible pago
       if (tieneImagen) {
         const msgImg =
           `✅ Recibimos tu imagen.\n\n` +
@@ -146,74 +136,58 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         await sleep(800)
         await enviarTexto(instancia, numero, msgImg)
         await guardarMensaje(prisma, { leadId: lead.id, direccion: 'SALIENTE', texto: msgImg })
-        await notificarVendedorGenerico({ prisma, instancia, lead, vendor, campaignSlug: null })
+        await notificarVendedor({ prisma, instancia, lead, vendor, campaignSlug: null })
+        ultimoMensajeMap.delete(numero)
         return
       }
 
-      // Lead ya notificado → silencio
-      // El vendedor ya recibió la alerta, él debe llamar
+      // Lead ya cerrado → silencio total
       if (lead.estado === 'NOTIFICADO' || lead.estado === 'CERRADO') {
         return
       }
 
-      // Sin campaña → silencio
-      if (!lead.campaignId) return
+      // ── FASE 2: Lead en flujo — acumular y esperar 15s ──────
+      if (lead.estado === 'EN_FLUJO') {
+        // Registrar timestamp de este mensaje
+        ultimoMensajeMap.set(numero, ahora)
 
-      const campaign = await prisma.campaign.findUnique({
-        where: { id: lead.campaignId },
-        include: { steps: { orderBy: { orden: 'asc' } }, vendor: true }
-      })
-      if (!campaign?.steps?.length) return
+        // Esperar 15 segundos
+        await sleep(15000)
 
-      const vendorCampaign = campaign.vendor || vendor
-      const pasosMsg = campaign.steps.filter(s => s.tipo === 'MSG')
+        // Verificar si llegó otro mensaje después de este
+        const tsActual = ultimoMensajeMap.get(numero)
+        if (tsActual && tsActual > ahora) {
+          // Llegó otro mensaje más reciente — este proceso cede el turno
+          console.log(`[Motor] ${numero} — mensaje más reciente detectado, cediendo`)
+          return
+        }
 
-      // Siguiente paso MSG no ejecutado aún
-      const siguientePaso = pasosMsg.find(s => s.orden > lead.pasoActual)
+        // 15s de silencio confirmados — cerrar flujo
+        const campaign = lead.campaignId
+          ? await prisma.campaign.findUnique({
+              where: { id: lead.campaignId },
+              include: { vendor: true }
+            })
+          : null
 
-      if (!siguientePaso) {
-        // Lead completó todos los pasos → mensaje de cierre
-        await enviarMensajeCierre({ prisma, instancia, numero, lead })
-        // Notificar al vendedor que el lead completó el flujo
-        await notificarVendedorGenerico({
-          prisma, instancia, lead,
-          vendor: vendorCampaign,
-          campaignSlug: campaign.slug
+        await cerrarFlujo({
+          prisma, instancia, numero, lead,
+          vendor: campaign?.vendor || vendor,
+          campaignSlug: campaign?.slug
         })
         return
       }
-
-      // Enviar el siguiente paso MSG
-      await enviarPasoMsg({
-        prisma, instancia, numero, lead,
-        vendor: vendorCampaign,
-        step: siguientePaso
-      })
-
-      // Ejecutar NOTIFYs que vengan después de este paso
-      await ejecutarNotifys({
-        prisma, instancia, lead,
-        vendor: vendorCampaign,
-        campaign,
-        stepEjecutado: siguientePaso
-      })
 
       return
     }
 
     // ════════════════════════════════════════════════════════
-    // LEAD NUEVO
+    // LEAD NUEVO — FASE 1
     // ════════════════════════════════════════════════════════
     const cursoCampana = detectarCursoCampana(texto)
+    const campaign = await getCampaignActiva(prisma, cursoCampana?.slug)
 
-    let campaign = null
-    if (cursoCampana?.slug) {
-      campaign = await getCampaignConSteps(prisma, cursoCampana.slug)
-    }
-    if (!campaign || !campaign.steps?.length) {
-      campaign = await getCampaignActiva(prisma)
-    }
-
+    // Crear lead
     lead = await prisma.lead.create({
       data: {
         telefono: numero,
@@ -227,46 +201,31 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
 
     await guardarMensaje(prisma, { leadId: lead.id, direccion: 'ENTRANTE', texto })
 
-    if (!campaign?.steps?.length) {
-      const msgFallback =
-        `Hola! Soy del equipo de *Perú Exporta TV* 🇵🇪\n\n` +
-        `Recibimos tu mensaje. Un asesor te contactará muy pronto.\n\n` +
-        `¿Cuéntanos: qué producto tienes en mente para exportar?`
-      await sleep(1000)
-      await enviarTexto(instancia, numero, msgFallback)
-      await guardarMensaje(prisma, { leadId: lead.id, direccion: 'SALIENTE', texto: msgFallback })
-      await notificarVendedorGenerico({ prisma, instancia, lead, vendor, campaignSlug: null })
-      return
+    // Obtener mensaje de bienvenida del FlowBuilder
+    let msgBienvenida = campaign?.id
+      ? await getMsgBienvenida(prisma, campaign.id)
+      : null
+
+    // Fallback si no hay mensaje en FlowBuilder
+    if (!msgBienvenida) {
+      msgBienvenida =
+        `Hola 👋 te saluda *Perú Exporta TV* 🇵🇪\n\n` +
+        `Cuéntame:\n` +
+        `¿Cómo te llamas y qué producto tienes en mente para exportar? 👇`
     }
 
-    const vendorCampaign = campaign.vendor || vendor
+    await sleep(1000)
+    await enviarTexto(instancia, numero, msgBienvenida)
+    await guardarMensaje(prisma, { leadId: lead.id, direccion: 'SALIENTE', texto: msgBienvenida })
 
-    // Ejecutar SOLO el primer paso MSG
-    const pasosMsg = campaign.steps.filter(s => s.tipo === 'MSG')
-    const primerPaso = pasosMsg[0]
-
-    if (!primerPaso) {
-      await notificarVendedorGenerico({
-        prisma, instancia, lead,
-        vendor: vendorCampaign,
-        campaignSlug: campaign.slug
-      })
-      return
-    }
-
-    await enviarPasoMsg({
-      prisma, instancia, numero, lead,
-      vendor: vendorCampaign,
-      step: primerPaso
+    // Pasar a EN_FLUJO — listo para acumular respuestas
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: { estado: 'EN_FLUJO', pasoActual: 1 }
     })
 
-    // NOTIFYs después del paso 1
-    await ejecutarNotifys({
-      prisma, instancia, lead,
-      vendor: vendorCampaign,
-      campaign,
-      stepEjecutado: primerPaso
-    })
+    // Registrar timestamp inicial
+    ultimoMensajeMap.set(numero, ahora)
 
   } catch (err) {
     console.error('[Motor] Error:', err.message)
