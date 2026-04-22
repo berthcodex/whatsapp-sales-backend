@@ -1,9 +1,20 @@
-// src/api/leads.js — Sprint 2 Final
-// Tabla leads limpia — schema correcto
+// src/api/leads.js — Sprint 3
+// Fix B1: GET /leads filtra por vendorId cuando se pasa el param
+// El vendedor ve sus leads, el ADMIN ve todos
 
 export async function getLeads(request, reply, prisma) {
   try {
+    const { vendorId, role } = request.query
+
+    // ADMIN (role=ADMIN o sin vendorId) ve todos los leads
+    // VENDOR ve solo los suyos
+    const where = {}
+    if (vendorId && role !== 'ADMIN') {
+      where.vendorId = Number(vendorId)
+    }
+
     const leads = await prisma.lead.findMany({
+      where,
       orderBy: { createdAt: 'desc' },
       take: 200,
       include: {
@@ -13,6 +24,9 @@ export async function getLeads(request, reply, prisma) {
             nombre: true,
             vendor: { select: { nombre: true, telefono: true } }
           }
+        },
+        vendor: {
+          select: { nombre: true, role: true }
         }
       }
     })
@@ -31,7 +45,8 @@ export async function getLeads(request, reply, prisma) {
       creadoEn: lead.createdAt,
       ultimoTimestamp: lead.ultimoMensaje || lead.createdAt,
       primerMensaje: '',
-      vendedor: lead.campaign?.vendor?.nombre || '',
+      vendedor: lead.vendor?.nombre || lead.campaign?.vendor?.nombre || '',
+      vendorId: lead.vendorId,
       instancia: '',
       fecha: lead.createdAt,
       urgente: lead.estado === 'NUEVO' || lead.estado === 'EN_FLUJO'
@@ -122,22 +137,19 @@ export async function doAccion(request, reply, prisma) {
 
 export async function getReportes(request, reply, prisma) {
   try {
+    const { vendorId, role } = request.query
+    const where = {}
+    if (vendorId && role !== 'ADMIN') where.vendorId = Number(vendorId)
+
     const [total, cerrados, enFlujo, nuevos] = await Promise.all([
-      prisma.lead.count(),
-      prisma.lead.count({ where: { estado: 'CERRADO' } }),
-      prisma.lead.count({ where: { estado: 'EN_FLUJO' } }),
-      prisma.lead.count({ where: { estado: 'NUEVO' } }),
+      prisma.lead.count({ where }),
+      prisma.lead.count({ where: { ...where, estado: 'CERRADO' } }),
+      prisma.lead.count({ where: { ...where, estado: 'EN_FLUJO' } }),
+      prisma.lead.count({ where: { ...where, estado: 'NUEVO' } }),
     ])
 
     const conversion = total > 0 ? Math.round((cerrados / total) * 100) : 0
-    return reply.send({
-      total,
-      cerrados,
-      porLlamar: enFlujo,
-      nuevos,
-      conversion,
-      periodo: 'todos'
-    })
+    return reply.send({ total, cerrados, porLlamar: enFlujo, nuevos, conversion, periodo: 'todos' })
   } catch (error) {
     console.error('[API/leads] Error en getReportes:', error.message)
     return reply.status(500).send({ error: 'Error al obtener reportes' })

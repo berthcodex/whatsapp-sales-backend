@@ -1,151 +1,207 @@
 // src/webhook/stateEngine.js
-// HIDATA — Motor Simplificado Sprint 1
+// HIDATA — Motor del Bot Sprint 3
 //
-// FLUJO MINIMO:
-// 1. Lead escribe → bot responde con mensaje del curso
-// 2. Bot notifica al vendedor
-// 3. Vendedor llama y cierra
-// Sin keywords, sin loops, sin estados intermedios.
+// CAMBIO CLAVE vs Sprint 1-2:
+// El motor ahora lee los FlowSteps de DB (creados en FlowBuilder)
+// en lugar de mensajes hardcodeados en bot_config.
+// Flujo: Lead escribe → detectar campaña → buscar steps activos → ejecutar paso 1 → notificar vendedor
 
 import { detectarCursoCampana } from './classifier.js'
 import { enviarTexto } from '../whatsapp/sender.js'
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-async function getBotConfig(prisma, tenantId) {
-  try {
-    return await prisma.botConfig.findFirst({ where: { tenantId, activo: true } })
-  } catch { return null }
+// ── Helpers DB ──────────────────────────────────────────────
+
+async function getCampaignConSteps(prisma, slug) {
+  return await prisma.campaign.findUnique({
+    where: { slug },
+    include: {
+      steps: { orderBy: { orden: 'asc' } },
+      vendor: true
+    }
+  })
 }
 
-async function guardarMensaje(prisma, { leadId, tenantId, vendedorId, direccion, contenido, estadoBot }) {
+async function getCampaignActiva(prisma) {
+  // Fallback: primera campaña activa si no hay slug detectado
+  return await prisma.campaign.findFirst({
+    where: { activa: true },
+    include: {
+      steps: { orderBy: { orden: 'asc' } },
+      vendor: true
+    }
+  })
+}
+
+async function guardarMensaje(prisma, { leadId, vendorId, direccion, texto }) {
   try {
-    await prisma.mensaje.create({
-      data: { leadId, tenantId, vendedorId: vendedorId || null, direccion, contenido, estadoBot, tipo: 'texto' }
+    await prisma.message.create({
+      data: { leadId, origen: direccion === 'ENTRANTE' ? 'LEAD' : 'BOT', texto }
     })
   } catch (err) {
     console.error('[Motor] Error guardando mensaje:', err.message)
   }
 }
 
-async function notificarVendedor({ prisma, instancia, lead, vendedor }) {
+async function notificarVendedor({ prisma, instancia, lead, vendor, campaignSlug }) {
   try {
-    const v = await prisma.vendedor.findUnique({ where: { id: vendedor.id } })
-    if (!v?.whatsappNumber) return
+    if (!vendor?.whatsappNumber) {
+      console.warn('[Motor] Vendedor sin whatsappNumber — no se puede notificar')
+      return
+    }
 
-    const leadActual = await prisma.lead.findUnique({ where: { id: lead.id } })
-    const nombreLead = leadActual?.nombre || lead.nombre || 'Sin nombre'
+    const mins = lead.createdAt
+      ? Math.floor((Date.now() - new Date(lead.createdAt).getTime()) / 60000)
+      : 0
+    const tiempoStr = mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)}h ${mins % 60}m`
 
-    const mins = lead.creadoEn
-      ? Math.floor((Date.now() - new Date(lead.creadoEn).getTime()) / 60000)
-      : null
-    const tiempoStr = mins !== null
-      ? mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)}h ${mins % 60}m`
-      : ''
-
-    const mensajes = await prisma.mensaje.findMany({
-      where: { leadId: lead.id, direccion: 'ENTRANTE' },
-      orderBy: { enviadoEn: 'asc' },
+    // Buscar historial de mensajes del lead
+    const mensajes = await prisma.message.findMany({
+      where: { leadId: lead.id, origen: 'LEAD' },
+      orderBy: { createdAt: 'asc' },
       take: 5
     })
-    const historial = mensajes.length > 0
-      ? mensajes.map(m => `  > "${m.contenido.slice(0, 80)}"`).join('\n')
-      : ''
+    const historial = mensajes.map(m => `  > "${m.texto.slice(0, 80)}"`).join('\n')
 
     const msg =
-      `NUEVO LEAD - LLAMA AHORA\n\n` +
-      `Nombre: ${nombreLead}\n` +
-      `Numero: wa.me/${lead.numero}\n` +
-      `Curso: ${lead.cursoInteres || 'organico'}\n` +
-      (tiempoStr ? `En sistema: ${tiempoStr}\n` : '') +
-      (historial ? `\nDijo:\n${historial}\n` : '') +
-      `\nLlama antes de que se enfrie!`
+      `🔔 NUEVO LEAD — LLAMA AHORA\n\n` +
+      `📱 Número: wa.me/${lead.telefono}\n` +
+      `📚 Curso: ${campaignSlug || 'orgánico'}\n` +
+      `⏱ En sistema: ${tiempoStr}\n` +
+      (historial ? `\n💬 Dijo:\n${historial}\n` : '') +
+      `\n⚡ Llama antes de que se enfríe!`
 
-    await enviarTexto(instancia, v.whatsappNumber, msg)
+    await enviarTexto(instancia, vendor.whatsappNumber, msg)
   } catch (err) {
     console.error('[Motor] Error notificando vendedor:', err.message)
   }
 }
 
-export async function procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendedor }) {
-  const { id: vendedorId, tenantId } = vendedor
+// ── Interpolación de variables en mensajes ───────────────────
+function interpolar(mensaje, lead, vendor) {
+  return mensaje
+    .replace(/\{\{telefono\}\}/g, lead.telefono || '')
+    .replace(/\{\{nombre\}\}/g, lead.telefono || '')
+    .replace(/\{\{vendedor\}\}/g, vendor?.nombre || '')
+    .replace(/\{\{curso\}\}/g, lead.campaignId ? '' : 'orgánico')
+}
 
+// ── Motor principal ──────────────────────────────────────────
+export async function procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor }) {
   try {
-    let lead = await prisma.lead.findFirst({ where: { numero, tenantId } })
+    // 1. ¿Lead ya existe?
+    let lead = await prisma.lead.findUnique({ where: { telefono: numero } })
 
     if (lead) {
+      // Lead existente — guardar mensaje entrante
       await guardarMensaje(prisma, {
-        leadId: lead.id, tenantId, vendedorId,
-        direccion: 'ENTRANTE', contenido: texto, estadoBot: lead.estadoBot
+        leadId: lead.id, vendorId: vendor.id,
+        direccion: 'ENTRANTE', texto: texto || '[imagen]'
       })
 
+      // Si mandó imagen → notificar vendedor (posible comprobante de pago)
       if (tieneImagen) {
-        const config = await getBotConfig(prisma, tenantId)
-        const msg = config?.msgHandoff ||
-          `Recibimos tu imagen. Un asesor validara tu pago y te dara los accesos en breve.`
-        await enviarTexto(instancia, numero, msg)
-        await guardarMensaje(prisma, {
-          leadId: lead.id, tenantId, vendedorId,
-          direccion: 'SALIENTE', contenido: msg, estadoBot: 'HANDOFF'
-        })
-        await notificarVendedor({ prisma, instancia, lead, vendedor })
+        const msgImg = `✅ Recibimos tu imagen. Un asesor validará tu pago y te dará los accesos en breve.`
+        await sleep(800)
+        await enviarTexto(instancia, numero, msgImg)
+        await guardarMensaje(prisma, { leadId: lead.id, vendorId: vendor.id, direccion: 'SALIENTE', texto: msgImg })
+
+        // Obtener campaign para notificar al vendedor correcto
+        const campaign = lead.campaignId
+          ? await prisma.campaign.findUnique({ where: { id: lead.campaignId }, include: { vendor: true } })
+          : null
+        await notificarVendedor({ prisma, instancia, lead, vendor: campaign?.vendor || vendor, campaignSlug: campaign?.slug })
       }
       return
     }
 
+    // 2. Lead nuevo — detectar campaña desde el primer mensaje
     const cursoCampana = detectarCursoCampana(texto)
 
+    let campaign = null
+    if (cursoCampana?.slug) {
+      campaign = await getCampaignConSteps(prisma, cursoCampana.slug)
+    }
+    // Si no hay campaña detectada o no tiene steps, buscar campaña activa como fallback
+    if (!campaign || !campaign.steps?.length) {
+      campaign = await getCampaignActiva(prisma)
+    }
+
+    // 3. Crear lead en DB con vendorId directo (Bug 1 fix)
     lead = await prisma.lead.create({
       data: {
-        tenantId, vendedorId, numero,
-        tipo: cursoCampana?.tipo || 'A',
-        tipoPreciso: cursoCampana?.tipo === 'B' ? 'Tipo B — broker' : 'Tipo A — formacion',
-        cursoInteres: cursoCampana?.slug || null,
-        prioridad: 'ALTA',
-        estadoBot: 'HANDOFF',
-        primerMensaje: texto,
-        ultimoTimestamp: new Date()
+        telefono: numero,
+        campaignId: campaign?.id || null,
+        vendorId: vendor.id,          // FK directo al vendedor de la instancia
+        pasoActual: 0,
+        estado: 'NUEVO',
+        ultimoMensaje: new Date()
       }
     })
 
     await guardarMensaje(prisma, {
-      leadId: lead.id, tenantId, vendedorId,
-      direccion: 'ENTRANTE', contenido: texto, estadoBot: 'HANDOFF'
+      leadId: lead.id, vendorId: vendor.id,
+      direccion: 'ENTRANTE', texto
     })
 
-    const config = await getBotConfig(prisma, tenantId)
-    let msgRespuesta
+    // 4. Ejecutar paso 1 del flujo (tipo MSG)
+    //    Si no hay flujo → mensaje genérico de fallback
+    const vendorNotificar = campaign?.vendor || vendor
+    let respondio = false
 
-    if (cursoCampana?.slug === 'MPX') {
-      msgRespuesta = config?.msgProductoMPX || config?.msgBienvenida ||
-        `Hola! Gracias por tu interes en *Mi Primera Exportacion*.\n\n` +
-        `Un asesor de Peru Exporta TV te contactara muy pronto.\n\n` +
-        `Estate pendiente al telefono!`
-    } else if (cursoCampana?.slug === 'E1K') {
-      msgRespuesta = config?.msgProductoA || config?.msgBienvenida ||
-        `Hola! Gracias por tu interes en *Exporta con 1,000 Soles*.\n\n` +
-        `Un asesor de Peru Exporta TV te contactara muy pronto.\n\n` +
-        `Estate pendiente al telefono!`
-    } else if (cursoCampana?.slug === 'CCI') {
-      msgRespuesta = config?.msgProductoB || config?.msgBienvenida ||
-        `Hola! Gracias por tu interes en *Contacta Compradores Internacionales*.\n\n` +
-        `Un asesor de Peru Exporta TV te contactara muy pronto.\n\n` +
-        `Estate pendiente al telefono!`
-    } else {
-      msgRespuesta = config?.msgBienvenida ||
-        `Hola! Soy del equipo de *Peru Exporta TV*.\n\n` +
-        `Vi tu mensaje y quiero ayudarte. Un asesor te contactara muy pronto.\n\n` +
-        `Mientras tanto, cuentame: que producto tienes o en que rubro estas?`
+    if (campaign?.steps?.length) {
+      // Buscar el primer paso MSG del flujo (puede haber un NOTIFY antes)
+      const pasosMsg = campaign.steps.filter(s => s.tipo === 'MSG')
+      const primerMsg = pasosMsg[0]
+
+      if (primerMsg) {
+        const msgTexto = interpolar(primerMsg.mensaje, lead, vendorNotificar)
+        await sleep(1000)
+        await enviarTexto(instancia, numero, msgTexto)
+        await guardarMensaje(prisma, {
+          leadId: lead.id, vendorId: vendor.id,
+          direccion: 'SALIENTE', texto: msgTexto
+        })
+        respondio = true
+
+        // Actualizar paso actual del lead
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: { pasoActual: primerMsg.orden, estado: 'EN_FLUJO' }
+        })
+      }
+
+      // Ejecutar pasos NOTIFY del flujo (notificaciones al vendedor)
+      const pasosNotify = campaign.steps.filter(s => s.tipo === 'NOTIFY')
+      if (pasosNotify.length > 0) {
+        // Usar el mensaje del NOTIFY del FlowBuilder si existe
+        const notifyMsg = interpolar(pasosNotify[0].mensaje, lead, vendorNotificar)
+        await enviarTexto(instancia, vendorNotificar.whatsappNumber || '', notifyMsg)
+      } else {
+        // Fallback: notificación genérica
+        await notificarVendedor({
+          prisma, instancia, lead,
+          vendor: vendorNotificar,
+          campaignSlug: campaign?.slug
+        })
+      }
     }
 
-    await sleep(1000)
-    await enviarTexto(instancia, numero, msgRespuesta)
-    await guardarMensaje(prisma, {
-      leadId: lead.id, tenantId, vendedorId,
-      direccion: 'SALIENTE', contenido: msgRespuesta, estadoBot: 'HANDOFF'
-    })
-
-    await notificarVendedor({ prisma, instancia, lead, vendedor })
+    // Si no hubo ningún paso MSG → mensaje genérico
+    if (!respondio) {
+      const msgFallback =
+        `Hola! Soy del equipo de *Perú Exporta TV* 🇵🇪\n\n` +
+        `Recibimos tu mensaje. Un asesor te contactará muy pronto.\n\n` +
+        `¿Cuéntanos: qué producto tienes en mente para exportar?`
+      await sleep(1000)
+      await enviarTexto(instancia, numero, msgFallback)
+      await guardarMensaje(prisma, {
+        leadId: lead.id, vendorId: vendor.id,
+        direccion: 'SALIENTE', texto: msgFallback
+      })
+      await notificarVendedor({ prisma, instancia, lead, vendor: vendorNotificar, campaignSlug: null })
+    }
 
   } catch (err) {
     console.error('[Motor] Error:', err.message)

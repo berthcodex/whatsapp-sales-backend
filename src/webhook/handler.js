@@ -1,5 +1,6 @@
 // src/webhook/handler.js
-// HIDATA — Webhook Handler
+// HIDATA — Webhook Handler Sprint 3
+// Fix B1: modelo "vendor" (no "vendedor"), instanciaEvolution ahora en DB real
 
 import { procesarConMotor } from './stateEngine.js'
 
@@ -14,21 +15,20 @@ function yaFueProcesado(messageId) {
   return false
 }
 
-function debeEsperar(numero, texto, callback) {
-  if (debounceMap.has(numero)) {
-    clearTimeout(debounceMap.get(numero).timer)
-  }
+function debeEsperar(numero, callback) {
+  if (debounceMap.has(numero)) clearTimeout(debounceMap.get(numero))
   const timer = setTimeout(() => {
     debounceMap.delete(numero)
     callback()
   }, 3000)
-  debounceMap.set(numero, { timer, texto })
+  debounceMap.set(numero, timer)
 }
 
-async function getVendedorPorInstancia(prisma, instancia) {
-  return await prisma.vendedor.findFirst({
-    where: { instanciaEvolution: instancia, activo: true },
-    include: { tenant: true }
+// Sprint 3 Fix: "prisma.vendor" es el modelo correcto (no "vendedor")
+// instanciaEvolution ahora existe en DB (migration_sprint3.sql)
+async function getVendorPorInstancia(prisma, instancia) {
+  return await prisma.vendor.findFirst({
+    where: { instanciaEvolution: instancia, activo: true }
   })
 }
 
@@ -65,18 +65,19 @@ export async function handleWebhook(request, reply, prisma) {
 
     if (!texto && !tieneImagen) return reply.send({ status: 'ignored' })
 
+    // Responder inmediato — Evolution API no espera más de 10s
     reply.send({ status: 'received' })
 
-    const vendedor = await getVendedorPorInstancia(prisma, instancia)
-    if (!vendedor) {
-      console.error(`[Handler] Instancia no reconocida: ${instancia}`)
+    const vendor = await getVendorPorInstancia(prisma, instancia)
+    if (!vendor) {
+      console.error(`[Handler] Instancia no reconocida: "${instancia}"`)
+      console.error('[Handler] Verifica vendors.instanciaEvolution en DB con migration_sprint3.sql')
       return
     }
 
-    debeEsperar(numero, texto, () => {
-      procesarConMotor({
-        prisma, instancia, numero, texto, tieneImagen, vendedor
-      }).catch(err => console.error('[Handler] Error:', err.message))
+    debeEsperar(numero, () => {
+      procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor })
+        .catch(err => console.error('[Handler] Error en motor:', err.message))
     })
 
   } catch (error) {
