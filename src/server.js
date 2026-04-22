@@ -52,7 +52,7 @@ await app.register(cors, {
 app.get('/health', async () => ({
   status: 'ok',
   service: 'Hidata — WhatsApp Sales ERP',
-  version: '2.1.0',
+  version: '2.2.0',
   timestamp: new Date().toISOString()
 }))
 
