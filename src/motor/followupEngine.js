@@ -40,7 +40,8 @@ import {
 // ── Mirror a Google Sheets ───────────────────────────────────
 async function escribirEnSheets({ telefono, msgInicial, mensajes, nombre, producto, perfil, prioridad, estado, vendedor, campana, accion = 'nuevo' }) {
   const url = process.env.SHEETS_WEBHOOK_URL
-  if (!url) return
+  if (!url) { console.log('[Sheets] SHEETS_WEBHOOK_URL no configurada'); return }
+  console.log('[Sheets] Enviando a:', url.slice(0, 60))
   try {
     // Google Apps Script requiere form-urlencoded, no JSON
     const params = new URLSearchParams({
@@ -63,7 +64,7 @@ async function escribirEnSheets({ telefono, msgInicial, mensajes, nombre, produc
       signal: AbortSignal.timeout(8000)
     })
   } catch (err) {
-    console.error('[Sheets] Error escribiendo:', err.message)
+    console.error('[Sheets] Error escribiendo:', err.message, err.cause?.message || '')
   }
 }
 
