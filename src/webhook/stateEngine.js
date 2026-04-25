@@ -56,7 +56,7 @@ async function cerrarConversacion(prisma, conv, lead) {
   await Promise.all([
     prisma.conversation.update({
       where: { id: conv.id },
-      data: { state: 'CLOSED', updatedAt: new Date() }
+      data: { state: 'CLOSED', updatedAt: new Date().toISOString() }
     }),
     prisma.lead.update({
       where: { id: lead.id },
@@ -68,7 +68,7 @@ async function cerrarConversacion(prisma, conv, lead) {
 async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor, texto }) {
   await prisma.conversation.update({
     where: { id: conv.id },
-    data: { lastLeadMessageAt: new Date(), updatedAt: new Date() }
+    data: { lastLeadMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
   })
 
   if (contiene(texto, KW_NO_INTERES)) {
@@ -146,7 +146,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
       if (conv) {
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { lastLeadMessageAt: new Date(), updatedAt: new Date() }
+          data: { lastLeadMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
         })
       }
 
@@ -179,7 +179,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
       // ACTIVE → acumular, el followupEngine avanza
       await prisma.lead.update({
         where: { id: lead.id },
-        data: { ultimoMensaje: new Date() }
+        data: { ultimoMensaje: new Date().toISOString() }
       }).catch(() => {})
       return
     }
@@ -195,7 +195,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         vendorId: vendor.id,
         pasoActual: 0,
         estado: 'EN_FLUJO',
-        ultimoMensaje: new Date()
+        ultimoMensaje: new Date().toISOString()
       }
     })
 
@@ -207,7 +207,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         vendorId: vendor.id,
         state: 'ACTIVE',
         currentStep: 0,
-        lastLeadMessageAt: new Date()
+        lastLeadMessageAt: new Date().toISOString()
       }
     }).catch(async (err) => {
       // Si ya existe (race condition), buscarla
@@ -247,8 +247,8 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         where: { id: conv.id },
         data: {
           currentStep: pasoBienvenida?.orden || 1,
-          lastBotMessageAt: new Date(),
-          updatedAt: new Date()
+          lastBotMessageAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
         }
       })
     }
