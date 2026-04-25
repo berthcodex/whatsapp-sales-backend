@@ -1,264 +1,379 @@
-// src/webhook/stateEngine.js — Sprint 4
+// src/motor/followupEngine.js — Sprint 4
+// Fix Bug 8: ventana de FOLLOWUP ampliada a 5 min (era 2 min imposibles)
 // Fix: usa prisma.conversation (modelo real) en vez de $queryRawUnsafe
-// Fix: sincroniza conversation.state + lead.estado siempre juntos
+// Fix: sincroniza conversation + lead siempre juntos
 
-import { detectarCursoCampana } from './classifier.js'
 import { enviarTexto } from '../whatsapp/sender.js'
+import {
+  extraerNombre,
+  extraerProducto,
+  clasificarConScoring,
+  clasificarConIA
+} from '../webhook/classifier.js'
 
-const sleep = ms => new Promise(r => setTimeout(r, ms))
+const SEG_SILENCIO       = 20
+const MAX_REACTIVACIONES = 3
+const MIN_ENTRE_REACTIVA = 30
 
-function norm(t) {
-  return (t || '').toLowerCase().normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ').trim()
-}
-function contiene(texto, kws) {
-  const n = norm(texto)
-  return kws.some(kw => n.includes(norm(kw)))
-}
-
-const KW_RECLAMO    = ['no me llamaron','nadie me llamo','no me han llamado','siguen sin llamar','cuando me llaman','no me contactaron','nunca me llamaron']
-const KW_HORA       = ['llamame a','a las','pm','am','en la tarde','en la noche','en la mañana','mas tarde','despues','al rato']
-const KW_PRECIO     = ['cuanto cuesta','precio','costo','caro','cuotas','descuento','inversion','cuanto es','cuanto vale']
-const KW_INTERES    = ['me interesa','quiero inscribirme','como me inscribo','quiero participar','dale','listo','acepto','si quiero']
-const KW_NO_INTERES = ['ya no','no me interesa','gracias igual','olvidalo','no gracias','no quiero']
-
-async function guardarMensaje(prisma, { leadId, conversationId, direccion, texto }) {
+async function escribirEnSheets(data) {
+  const url = process.env.SHEETS_WEBHOOK_URL
+  if (!url) return
   try {
-    await prisma.message.create({
-      data: {
-        leadId,
-        conversationId: conversationId || null,
-        origen: direccion === 'ENTRANTE' ? 'LEAD' : 'BOT',
-        texto
-      }
+    const params = new URLSearchParams({
+      accion:     data.accion     || 'nuevo',
+      telefono:   data.telefono   || '',
+      msgInicial: (data.msgInicial|| '').slice(0, 200),
+      mensajes:   (data.mensajes  || '').slice(0, 500),
+      nombre:     data.nombre     || '',
+      producto:   data.producto   || '',
+      perfil:     data.perfil     || '',
+      prioridad:  data.prioridad  || '',
+      estado:     data.estado     || '',
+      vendedor:   data.vendedor   || '',
+      campana:    data.campana    || ''
+    })
+    await fetch(`${url}?${params.toString()}`, {
+      method: 'GET', redirect: 'follow',
+      signal: AbortSignal.timeout(8000)
     })
   } catch (err) {
-    console.error('[Motor] guardarMensaje:', err.message)
+    console.error('[Sheets] Error:', err.message)
   }
 }
 
-async function getCampaign(prisma, slug) {
-  if (slug) {
-    const c = await prisma.campaign.findUnique({
-      where: { slug },
-      include: { vendor: true, steps: { orderBy: { orden: 'asc' } } }
-    })
-    if (c) return c
+async function clasificar(texto) {
+  if (!texto || texto.trim().length < 3) {
+    return { tipo: 'A', tipoPreciso: 'Tipo A — formación', prioridad: 'MEDIA', confianza: 'baja' }
   }
-  return await prisma.campaign.findFirst({
-    where: { activa: true },
-    include: { vendor: true, steps: { orderBy: { orden: 'asc' } } }
-  })
+  const nombre   = extraerNombre(texto)
+  const producto = extraerProducto(texto)
+  const scoring  = clasificarConScoring(texto)
+  let clasif = scoring
+  if (scoring.confianza === 'baja' && process.env.GROQ_API_KEY) {
+    try { const ia = await clasificarConIA(texto); clasif = { ...scoring, ...ia } } catch {}
+  }
+  return { nombre, producto, ...clasif }
 }
 
-async function cerrarConversacion(prisma, conv, lead) {
-  await Promise.all([
-    prisma.conversation.update({
-      where: { id: conv.id },
-    }),
-    prisma.lead.update({
-      where: { id: lead.id },
-      data: { estado: 'CERRADO' }
-    })
-  ])
+function interp(msg, vars) {
+  return (msg || '')
+    .replace(/\{\{nombre\}\}/g,    vars.nombre    || vars.telefono || '')
+    .replace(/\{\{producto\}\}/g,  vars.producto  || 'tu producto')
+    .replace(/\{\{telefono\}\}/g,  vars.telefono  || '')
+    .replace(/\{\{vendedor\}\}/g,  vars.vendedor  || '')
+    .replace(/\{\{curso\}\}/g,     vars.curso     || 'Mi Primera Exportación')
+    .replace(/\{\{historial\}\}/g, vars.historial || '')
 }
 
-async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor, texto }) {
-  await prisma.conversation.update({
-    where: { id: conv.id },
-    data: { lastLeadMessageAt: new Date().toISOString() }
-  })
-
-  if (contiene(texto, KW_NO_INTERES)) {
-    const msg = `Entendido, no hay problema 😊\n\nSi en algún momento cambias de opinión, aquí estaremos.\n\n¡Mucho éxito!`
-    await enviarTexto(instancia, numero, msg)
-    await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    await cerrarConversacion(prisma, conv, lead)
-    return
-  }
-
-  if (contiene(texto, KW_RECLAMO)) {
-    const msg = `Mil disculpas, eso no debería pasar 🙏\n\nYa envié una alerta urgente a tu asesor — te llama en los próximos minutos.\n\n¡Gracias por tu paciencia!`
-    await enviarTexto(instancia, numero, msg)
-    await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    if (vendor?.whatsappNumber) {
-      await enviarTexto(instancia, vendor.whatsappNumber, `⚠️ URGENTE — Lead reclama que nadie lo llamó\n\n📱 wa.me/${lead.telefono}\n¡Llama ahora!`)
-    }
-    return
-  }
-
-  if (contiene(texto, KW_HORA)) {
-    const msg = `Perfecto! 📅\n\nLe aviso a tu asesor que te llame en ese horario.\n\n¡Estate pendiente al teléfono!`
-    await enviarTexto(instancia, numero, msg)
-    await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    if (vendor?.whatsappNumber) {
-      await enviarTexto(instancia, vendor.whatsappNumber, `📌 Lead pidió hora específica\n📱 wa.me/${lead.telefono}\nDijo: "${texto.slice(0, 80)}"`)
-    }
-    return
-  }
-
-  if (contiene(texto, KW_PRECIO)) {
-    const msg = `¡Claro! 💰\n\nTenemos facilidades de pago en cuotas.\n\nTu asesor te explicará todos los detalles cuando te llame — ¡que es hoy! 😊`
-    await enviarTexto(instancia, numero, msg)
-    await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    return
-  }
-
-  if (contiene(texto, KW_INTERES)) {
-    const msg = `¡Genial! 🎉\n\nYa avisé a tu asesor — te llama muy pronto.\n\n¡Estate atento al teléfono!`
-    await enviarTexto(instancia, numero, msg)
-    await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    if (vendor?.whatsappNumber) {
-      await enviarTexto(instancia, vendor.whatsappNumber, `🔄 Lead reconfirmó interés\n📱 wa.me/${lead.telefono}`)
-    }
-    return
-  }
-
-  // Default
-  const msg = `¡Hola! 👋\n\nTu asesor ya está al tanto y te llama muy pronto.\n\n¡Estate pendiente al teléfono!`
-  await enviarTexto(instancia, numero, msg)
-  await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-}
-
-// ════════════════════════════════════════════════════════════
-// MOTOR PRINCIPAL
-// ════════════════════════════════════════════════════════════
-export async function procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor }) {
+async function guardarMsg(prisma, leadId, convId, texto) {
   try {
-    const lead = await prisma.lead.findUnique({ where: { telefono: numero } })
+    await prisma.message.create({
+      data: { leadId, conversationId: convId || null, origen: 'BOT', texto }
+    })
+  } catch {}
+}
 
-    // ── LEAD EXISTENTE ───────────────────────────────────────
-    if (lead) {
-      const conv = await prisma.conversation.findFirst({
-        where: { leadId: lead.id },
-        orderBy: { createdAt: 'desc' }
+async function enviarLead(inst, tel, msg) {
+  try { await enviarTexto(inst, tel, msg) }
+  catch (e) { console.error(`[Followup] enviarLead ${tel}:`, e.message) }
+}
+
+async function enviarVendedor(inst, num, msg) {
+  try { await enviarTexto(inst, num, msg) }
+  catch (e) { console.error('[Followup] enviarVendedor:', e.message) }
+}
+
+// ════════════════════════════════════════════════════════════
+export async function ejecutarFollowup(prisma) {
+  const ahora = new Date()
+  let procesados = 0
+
+  // ══════════════════════════════════════════════════════════
+  // FASE 1: Avanzar pasos del FlowBuilder en conversations ACTIVE
+  // ══════════════════════════════════════════════════════════
+  const convsActivas = await prisma.conversation.findMany({
+    where: {
+      state: { in: ['ACTIVE', 'REACTIVATED'] },
+      lastLeadMessageAt: {
+        lt: new Date(ahora.getTime() - SEG_SILENCIO * 1000)
+      },
+      OR: [
+        { lastBotMessageAt: null },
+        { lastBotMessageAt: { lt: prisma.conversation.fields?.lastLeadMessageAt } }
+      ]
+    },
+    include: {
+      lead: true,
+      campaign: { include: { steps: { orderBy: { orden: 'asc' } } } },
+      vendor: true
+    }
+  })
+
+  for (const conv of convsActivas) {
+    try {
+      const instancia = conv.vendor?.instanciaEvolution
+      if (!instancia) continue
+
+      // Re-verificar que lastBotMessage < lastLeadMessage
+      if (conv.lastBotMessageAt && conv.lastLeadMessageAt &&
+          conv.lastBotMessageAt >= conv.lastLeadMessageAt) continue
+
+      const mensajes = await prisma.message.findMany({
+        where: { leadId: conv.leadId, origen: 'LEAD' },
+        orderBy: { createdAt: 'asc' }
       })
+      const textoAcumulado = mensajes.map(m => m.texto).join(' ')
+      const historial      = mensajes.map(m => `  > "${m.texto.slice(0, 100)}"`).join('\n')
+      const clasif = await clasificar(textoAcumulado)
 
-      await guardarMensaje(prisma, {
-        leadId: lead.id,
-        conversationId: conv?.id || null,
-        direccion: 'ENTRANTE',
-        texto: texto || '[imagen]'
-      })
+      await prisma.lead.update({
+        where: { id: conv.leadId },
+        data: {
+          nombreDetectado:   clasif.nombre   || undefined,
+          productoDetectado: clasif.producto || undefined
+        }
+      }).catch(() => {})
 
-      if (conv) {
+      const vars = {
+        nombre:   clasif.nombre   || conv.lead.telefono,
+        producto: clasif.producto || 'tu producto',
+        telefono: conv.lead.telefono,
+        vendedor: conv.vendor?.nombre  || '',
+        curso:    conv.campaign?.nombre || 'Mi Primera Exportación',
+        historial
+      }
+
+      const steps     = conv.campaign?.steps || []
+      const pasoActual = conv.currentStep || 0
+      const pasosSig  = steps.filter(s => s.orden > pasoActual)
+
+      let proximoMSG = null
+      const notifysAhora = []
+
+      for (const paso of pasosSig) {
+        if (paso.tipo === 'NOTIFY') { notifysAhora.push(paso); continue }
+        if (paso.tipo === 'MSG' && !proximoMSG) { proximoMSG = paso; break }
+      }
+
+      if (proximoMSG) {
+        for (const notify of notifysAhora) {
+          if (conv.vendor?.whatsappNumber) {
+            await enviarVendedor(instancia, conv.vendor.whatsappNumber, interp(notify.mensaje, vars))
+          }
+        }
+        const msgLead = interp(proximoMSG.mensaje, vars)
+        await enviarLead(instancia, conv.lead.telefono, msgLead)
+        await guardarMsg(prisma, conv.leadId, conv.id, msgLead)
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { lastLeadMessageAt: new Date().toISOString() }
+          data: { currentStep: proximoMSG.orden, lastBotMessageAt: new Date().toISOString() }
+        })
+        await prisma.lead.update({
+          where: { id: conv.leadId },
+          data: { pasoActual: proximoMSG.orden, ultimoMensaje: new Date().toISOString() }
+        }).catch(() => {})
+        procesados++
+        console.log(`[Followup] Paso ${proximoMSG.orden}: ${conv.lead.telefono}`)
+        continue
+      }
+
+      // Sin más pasos MSG → notificar vendedor → NOTIFIED
+      if (conv.vendorNotificationCount === 0) {
+        for (const notify of notifysAhora) {
+          if (conv.vendor?.whatsappNumber) {
+            await enviarVendedor(instancia, conv.vendor.whatsappNumber, interp(notify.mensaje, vars))
+          }
+        }
+
+        if (notifysAhora.length === 0 && conv.vendor?.whatsappNumber) {
+          const prioEmoji = clasif.prioridad === 'URGENTE' ? '🔴' : clasif.prioridad === 'ALTA' ? '🟠' : '🟡'
+          const msgVendedor =
+            `${prioEmoji} NUEVO LEAD — ${clasif.prioridad}\n\n` +
+            `📱 wa.me/${conv.lead.telefono}\n` +
+            `👤 ${clasif.nombre || 'Sin nombre'}\n` +
+            `📦 ${clasif.producto || 'Sin producto'}\n` +
+            `🎯 ${clasif.tipoPreciso || ''}\n` +
+            `📚 ${conv.campaign?.nombre || 'orgánico'}\n` +
+            (historial ? `\n💬 Dijo:\n${historial}\n` : '') +
+            `\n⚡ ${clasif.prioridad === 'URGENTE' ? '¡Llama AHORA!' : 'Llama hoy'}`
+          await enviarVendedor(instancia, conv.vendor.whatsappNumber, msgVendedor)
+        }
+
+        await escribirEnSheets({
+          accion: 'nuevo', telefono: conv.lead.telefono,
+          msgInicial: mensajes[0]?.texto || '',
+          mensajes: mensajes.map(m => m.texto).join(' | '),
+          nombre: clasif.nombre || '', producto: clasif.producto || '',
+          perfil: clasif.tipoPreciso, prioridad: clasif.prioridad,
+          estado: 'pendiente llamar',
+          vendedor: conv.vendor?.nombre || '',
+          campana: conv.campaign?.nombre || ''
         })
       }
 
-      // Imagen → comprobante de pago
-      if (tieneImagen) {
-        const msg = `✅ Recibimos tu imagen.\n\nUn asesor validará tu pago y te dará los accesos en breve.`
-        await sleep(800)
-        await enviarTexto(instancia, numero, msg)
-        await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv?.id, direccion: 'SALIENTE', texto: msg })
-        return
-      }
-
-      const convState = conv?.state || 'ACTIVE'
-
-      if (convState === 'CLOSED' || lead.estado === 'CERRADO') return
-
-      if (convState === 'NOTIFIED' || lead.estado === 'NOTIFICADO') {
-        const campaignData = lead.campaignId
-          ? await prisma.campaign.findUnique({ where: { id: lead.campaignId }, include: { vendor: true } })
-          : null
-        await manejarNotificado({
-          prisma, instancia, numero, lead,
-          conv: conv || { id: null },
-          vendor: campaignData?.vendor || vendor,
-          texto
-        })
-        return
-      }
-
-      // ACTIVE → acumular, el followupEngine avanza
-      await prisma.lead.update({
-        where: { id: lead.id },
-        data: { ultimoMensaje: new Date().toISOString() }
-      }).catch(() => {})
-      return
-    }
-
-    // ── LEAD NUEVO ───────────────────────────────────────────
-    const cursoCampana = detectarCursoCampana(texto)
-    const campaign = await getCampaign(prisma, cursoCampana?.slug)
-
-    const newLead = await prisma.lead.create({
-      data: {
-        telefono: numero,
-        campaignId: campaign?.id || null,
-        vendorId: vendor.id,
-        pasoActual: 0,
-        estado: 'EN_FLUJO',
-        ultimoMensaje: new Date().toISOString()
-      }
-    })
-
-    // Crear conversation con modelo Prisma real
-    const conv = await prisma.conversation.create({
-      data: {
-        leadId: newLead.id,
-        campaignId: campaign?.id || null,
-        vendorId: vendor.id,
-        state: 'ACTIVE',
-        currentStep: 0,
-        lastLeadMessageAt: new Date().toISOString()
-      }
-    }).catch(async (err) => {
-      // Si ya existe (race condition), buscarla
-      console.error('[Motor] conversation ya existe:', err.message)
-      return await prisma.conversation.findFirst({ where: { leadId: newLead.id } })
-    })
-
-    await guardarMensaje(prisma, {
-      leadId: newLead.id,
-      conversationId: conv?.id || null,
-      direccion: 'ENTRANTE',
-      texto
-    })
-
-    // Bienvenida desde FlowBuilder
-    const pasosMSG = campaign?.steps?.filter(s => s.tipo === 'MSG') || []
-    const pasoBienvenida = pasosMSG[0]
-
-    const msgBienvenida = pasoBienvenida?.mensaje
-      ? pasoBienvenida.mensaje
-          .replace(/\{\{telefono\}\}/g, numero)
-          .replace(/\{\{vendedor\}\}/g, vendor?.nombre || '')
-          .replace(/\{\{curso\}\}/g, campaign?.nombre || '')
-      : `Hola 👋 te saluda *Perú Exporta TV* 🇵🇪\n\nCuéntame: ¿cómo te llamas y qué producto tienes en mente para exportar? 👇`
-
-    await sleep(1000)
-    await enviarTexto(instancia, numero, msgBienvenida)
-    await guardarMensaje(prisma, {
-      leadId: newLead.id,
-      conversationId: conv?.id || null,
-      direccion: 'SALIENTE',
-      texto: msgBienvenida
-    })
-
-    if (conv?.id) {
       await prisma.conversation.update({
         where: { id: conv.id },
         data: {
-          currentStep: pasoBienvenida?.orden || 1,
+          state: 'NOTIFIED',
+          vendorNotifiedAt: new Date().toISOString(),
+          vendorNotificationCount: conv.vendorNotificationCount + 1,
+        }
+      })
+      await prisma.lead.update({
+        where: { id: conv.leadId },
+        data: { estado: 'NOTIFICADO', ultimoMensaje: new Date().toISOString() }
+      }).catch(() => {})
+
+      procesados++
+      console.log(`[Followup] NOTIFIED: ${conv.lead.telefono} | ${clasif.tipoPreciso} | ${clasif.prioridad}`)
+
+    } catch (err) {
+      console.error(`[Followup] Error conv ${conv.id}:`, err.message)
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // FASE 2: FOLLOWUP steps (ventana ampliada a 5 min)
+  // Fix Bug 8: era 2 min, ahora 5 min para no perderse con el cron
+  // ══════════════════════════════════════════════════════════
+  const convsFollowup = await prisma.conversation.findMany({
+    where: { state: { in: ['ACTIVE', 'REACTIVATED'] }, campaignId: { not: null } },
+    include: {
+      lead: true,
+      campaign: { include: { steps: { orderBy: { orden: 'asc' } } } },
+      vendor: true
+    }
+  })
+
+  for (const conv of convsFollowup) {
+    try {
+      const instancia = conv.vendor?.instanciaEvolution
+      if (!instancia) continue
+
+      const ultimoTs = conv.lastLeadMessageAt
+        ? new Date(conv.lastLeadMessageAt).getTime() : 0
+      const horasSilencio = (ahora.getTime() - ultimoTs) / 3600000
+      const pasoActual = conv.currentStep || 0
+
+      const followup = conv.campaign?.steps?.find(s =>
+        s.tipo === 'FOLLOWUP' &&
+        s.orden > pasoActual &&
+        s.followupHrs &&
+        horasSilencio >= s.followupHrs &&
+        horasSilencio < s.followupHrs + (5 / 60) // ← ventana 5 minutos (era 2)
+      )
+      if (!followup) continue
+
+      const vars = {
+        nombre:   conv.lead.nombreDetectado || conv.lead.telefono,
+        producto: conv.lead.productoDetectado || 'tu producto',
+        telefono: conv.lead.telefono,
+        vendedor: conv.vendor?.nombre || '',
+        curso:    conv.campaign?.nombre || '',
+        historial: ''
+      }
+
+      const msgFollowup = interp(followup.mensaje, vars)
+      await enviarLead(instancia, conv.lead.telefono, msgFollowup)
+      await guardarMsg(prisma, conv.leadId, conv.id, msgFollowup)
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: { currentStep: followup.orden, lastBotMessageAt: new Date().toISOString() }
+      })
+      await prisma.lead.update({
+        where: { id: conv.leadId },
+        data: { pasoActual: followup.orden, ultimoMensaje: new Date().toISOString() }
+      }).catch(() => {})
+
+      procesados++
+      console.log(`[Followup] FOLLOWUP ${followup.followupHrs}h: ${conv.lead.telefono}`)
+    } catch (err) {
+      console.error(`[Followup] Error followup step ${conv.id}:`, err.message)
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // FASE 3: Reactivaciones anti-loop
+  // ══════════════════════════════════════════════════════════
+  const convsReactivar = await prisma.conversation.findMany({
+    where: {
+      state: 'NOTIFIED',
+      reactivationCount: { lt: MAX_REACTIVACIONES },
+      lastLeadMessageAt: { lt: new Date(ahora.getTime() - 30 * 60 * 1000) },
+      OR: [
+        { lastReactivationAt: null },
+        { lastReactivationAt: { lt: new Date(ahora.getTime() - MIN_ENTRE_REACTIVA * 60 * 1000) } }
+      ]
+    },
+    include: { lead: true, vendor: true, campaign: true }
+  })
+
+  for (const conv of convsReactivar) {
+    try {
+      const instancia = conv.vendor?.instanciaEvolution
+      if (!instancia) continue
+
+      const ultimoTs = conv.lastLeadMessageAt
+        ? new Date(conv.lastLeadMessageAt).getTime()
+        : new Date(conv.createdAt).getTime()
+      const minutos = Math.floor((ahora.getTime() - ultimoTs) / 60000)
+      const reactCount = conv.reactivationCount
+
+      if (minutos >= 2880) {
+        await prisma.lead.update({ where: { id: conv.leadId }, data: { estado: 'CERRADO' } }).catch(() => {})
+        console.log(`[Followup] CLOSED (48h): ${conv.lead.telefono}`)
+        continue
+      }
+
+      let msg = null
+      let alertVendedor = null
+
+      if (minutos >= 1440 && reactCount === 0) {
+        msg = `¡Hola! 👋 Qué gusto saber de ti de nuevo.\n\nTenemos nuevas fechas disponibles.\n\n¿Sigues interesado/a? 😊`
+        alertVendedor = `🔄 Lead reactivado +24h\n📱 wa.me/${conv.lead.telefono}`
+      } else if (minutos >= 120 && minutos < 180 && reactCount === 0) {
+        msg = `Hola! 🙏\n\nLamentamos la espera. Ya escalé tu caso como urgente.\n\nUn asesor te llama hoy sin falta. ¿A qué hora te viene mejor? 👇`
+        alertVendedor = `⚠️ URGENTE — Lead lleva 2h esperando\n📱 wa.me/${conv.lead.telefono}`
+      } else if (minutos >= 60 && minutos < 65 && reactCount === 0) {
+        msg = `Hola de nuevo! 😊\n\nYa le recordé a tu asesor — te contacta hoy.\n\n¿A qué hora te viene mejor? 👇`
+        alertVendedor = `📌 Lead lleva 1h esperando\n📱 wa.me/${conv.lead.telefono}`
+      } else if (minutos >= 30 && minutos < 35 && reactCount === 0) {
+        if (conv.vendor?.whatsappNumber) {
+          await enviarVendedor(instancia, conv.vendor.whatsappNumber, `🔔 Lead lleva 30min esperando\n📱 wa.me/${conv.lead.telefono}`)
+        }
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: { reactivationCount: reactCount + 1, lastReactivationAt: new Date().toISOString() }
+        })
+        procesados++
+        continue
+      }
+
+      if (!msg) continue
+
+      await enviarLead(instancia, conv.lead.telefono, msg)
+      await guardarMsg(prisma, conv.leadId, conv.id, msg)
+      if (alertVendedor && conv.vendor?.whatsappNumber) {
+        await enviarVendedor(instancia, conv.vendor.whatsappNumber, alertVendedor)
+      }
+
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: {
+          reactivationCount: reactCount + 1,
+          lastReactivationAt: new Date().toISOString(),
           lastBotMessageAt: new Date().toISOString(),
         }
       })
+
+      procesados++
+      console.log(`[Followup] Reactivación #${reactCount + 1}: ${conv.lead.telefono}`)
+
+    } catch (err) {
+      console.error(`[Followup] Error reactivando ${conv.id}:`, err.message)
     }
-
-    await prisma.lead.update({
-      where: { id: newLead.id },
-      data: { pasoActual: pasoBienvenida?.orden || 1 }
-    })
-
-    console.log(`[Motor] Lead nuevo: ${numero} | campaña: ${campaign?.slug || 'orgánico'}`)
-
-  } catch (err) {
-    console.error('[Motor] Error:', err.message, err.stack)
   }
+
+  console.log(`[Followup] Total procesados: ${procesados}`)
+  return { ok: true, procesados, timestamp: ahora.toISOString() }
 }
