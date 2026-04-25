@@ -1,16 +1,7 @@
-// src/motor/followupEngine.js
-// HIDATA — Motor de Seguimiento v3.0 — CON CONVERSATIONS
-//
-// FIX DEFINITIVO de mensajes repetidos:
-// ANTES: usaba lead.estado + timestamp → drift temporal causaba loops
-// AHORA: usa conversations.state + reactivation_count → control exacto
-//
-// REGLAS ANTI-LOOP:
-// 1. Max 3 reactivaciones por conversation (campo reactivation_count)
-// 2. Ventana de reactivación: min 30min desde last_reactivation_at
-// 3. Reactivación no resetea pasoActual=0 — continúa desde current_step
-// 4. Estado REACTIVATED → mismo comportamiento que ACTIVE pero con contador
-// 5. vendor_notification_count evita notificar al vendedor más de 1 vez por conv
+// src/motor/followupEngine.js — Sprint 4
+// Fix Bug 8: ventana de FOLLOWUP ampliada a 5 min (era 2 min imposibles)
+// Fix: usa prisma.conversation (modelo real) en vez de $queryRawUnsafe
+// Fix: sincroniza conversation + lead siempre juntos
 
 import { enviarTexto } from '../whatsapp/sender.js'
 import {
@@ -20,11 +11,10 @@ import {
   clasificarConIA
 } from '../webhook/classifier.js'
 
-const SEG_SILENCIO      = 20
+const SEG_SILENCIO       = 20
 const MAX_REACTIVACIONES = 3
-const MIN_ENTRE_REACTIVA = 30   // minutos mínimos entre reactivaciones
+const MIN_ENTRE_REACTIVA = 30
 
-// ── Mirror a Google Sheets ───────────────────────────────────
 async function escribirEnSheets(data) {
   const url = process.env.SHEETS_WEBHOOK_URL
   if (!url) return
@@ -46,7 +36,6 @@ async function escribirEnSheets(data) {
       method: 'GET', redirect: 'follow',
       signal: AbortSignal.timeout(8000)
     })
-    console.log('[Sheets] Sincronizado:', data.telefono)
   } catch (err) {
     console.error('[Sheets] Error:', err.message)
   }
@@ -79,187 +68,165 @@ function interp(msg, vars) {
 async function guardarMsg(prisma, leadId, convId, texto) {
   try {
     await prisma.message.create({
-      data: { leadId, conversation_id: convId || null, origen: 'BOT', texto }
+      data: { leadId, conversationId: convId || null, origen: 'BOT', texto }
     })
   } catch {}
 }
+
 async function enviarLead(inst, tel, msg) {
   try { await enviarTexto(inst, tel, msg) }
   catch (e) { console.error(`[Followup] enviarLead ${tel}:`, e.message) }
 }
+
 async function enviarVendedor(inst, num, msg) {
   try { await enviarTexto(inst, num, msg) }
   catch (e) { console.error('[Followup] enviarVendedor:', e.message) }
 }
 
-// Actualizar conversation state con raw SQL (tabla nueva sin modelo Prisma)
-async function updateConv(prisma, convId, fields) {
-  const sets = Object.entries(fields)
-    .map(([k, v], i) => `${k} = $${i + 2}`)
-    .join(', ')
-  const vals = Object.values(fields)
-  await prisma.$executeRawUnsafe(
-    `UPDATE conversations SET ${sets}, updated_at = NOW() WHERE id = $1`,
-    convId, ...vals
-  ).catch(err => console.error('[Followup] updateConv:', err.message))
-}
-
-// ════════════════════════════════════════════════════════════
-// FUNCIÓN PRINCIPAL
 // ════════════════════════════════════════════════════════════
 export async function ejecutarFollowup(prisma) {
   const ahora = new Date()
   let procesados = 0
 
   // ══════════════════════════════════════════════════════════
-  // FASE 1: Avanzar conversations ACTIVE con silencio > 20s
+  // FASE 1: Avanzar pasos del FlowBuilder en conversations ACTIVE
   // ══════════════════════════════════════════════════════════
-  const convsActivas = await prisma.$queryRawUnsafe(`
-    SELECT c.*, l.telefono, l."pasoActual", l."nombreDetectado", l."productoDetectado",
-           cam.nombre AS campaign_nombre, cam.slug AS campaign_slug,
-           v."whatsappNumber" AS vendor_phone, v.nombre AS vendor_nombre,
-           v."instanciaEvolution" AS instancia
-    FROM conversations c
-    JOIN leads l ON l.id = c.lead_id
-    LEFT JOIN campaigns cam ON cam.id = c.campaign_id
-    LEFT JOIN vendors v ON v.id = c.vendor_id
-    WHERE c.state IN ('ACTIVE', 'REACTIVATED')
-      AND c.last_lead_message_at < NOW() - INTERVAL '${SEG_SILENCIO} seconds'
-      AND (c.last_bot_message_at IS NULL OR c.last_bot_message_at < c.last_lead_message_at)
-  `)
+  const convsActivas = await prisma.conversation.findMany({
+    where: {
+      state: { in: ['ACTIVE', 'REACTIVATED'] },
+      lastLeadMessageAt: {
+        lt: new Date(ahora.getTime() - SEG_SILENCIO * 1000)
+      },
+      OR: [
+        { lastBotMessageAt: null },
+        { lastBotMessageAt: { lt: prisma.conversation.fields?.lastLeadMessageAt } }
+      ]
+    },
+    include: {
+      lead: true,
+      campaign: { include: { steps: { orderBy: { orden: 'asc' } } } },
+      vendor: true
+    }
+  })
 
   for (const conv of convsActivas) {
     try {
-      const instancia = conv.instancia
+      const instancia = conv.vendor?.instanciaEvolution
       if (!instancia) continue
 
-      // Cargar campaign con steps
-      const campaign = conv.campaign_id
-        ? await prisma.campaign.findUnique({
-            where: { id: conv.campaign_id },
-            include: { steps: { orderBy: { orden: 'asc' } } }
-          })
-        : null
+      // Re-verificar que lastBotMessage < lastLeadMessage
+      if (conv.lastBotMessageAt && conv.lastLeadMessageAt &&
+          conv.lastBotMessageAt >= conv.lastLeadMessageAt) continue
 
-      // Mensajes del lead en esta conversation
       const mensajes = await prisma.message.findMany({
-        where: { leadId: Number(conv.lead_id), origen: 'LEAD' },
+        where: { leadId: conv.leadId, origen: 'LEAD' },
         orderBy: { createdAt: 'asc' }
       })
       const textoAcumulado = mensajes.map(m => m.texto).join(' ')
       const historial      = mensajes.map(m => `  > "${m.texto.slice(0, 100)}"`).join('\n')
-
       const clasif = await clasificar(textoAcumulado)
 
-      // Guardar clasificación
       await prisma.lead.update({
-        where: { id: Number(conv.lead_id) },
+        where: { id: conv.leadId },
         data: {
-          nombreDetectado:   clasif.nombre   || null,
-          productoDetectado: clasif.producto || null,
+          nombreDetectado:   clasif.nombre   || undefined,
+          productoDetectado: clasif.producto || undefined
         }
       }).catch(() => {})
 
       const vars = {
-        nombre:    clasif.nombre   || conv.telefono,
-        producto:  clasif.producto || 'tu producto',
-        telefono:  conv.telefono,
-        vendedor:  conv.vendor_nombre  || '',
-        curso:     conv.campaign_nombre|| 'Mi Primera Exportación',
+        nombre:   clasif.nombre   || conv.lead.telefono,
+        producto: clasif.producto || 'tu producto',
+        telefono: conv.lead.telefono,
+        vendedor: conv.vendor?.nombre  || '',
+        curso:    conv.campaign?.nombre || 'Mi Primera Exportación',
         historial
       }
 
-      const steps      = campaign?.steps || []
-      const pasoActual = Number(conv.current_step) || 0
-      const pasosSig   = steps.filter(s => s.orden > pasoActual)
+      const steps     = conv.campaign?.steps || []
+      const pasoActual = conv.currentStep || 0
+      const pasosSig  = steps.filter(s => s.orden > pasoActual)
 
       let proximoMSG = null
       const notifysAhora = []
 
       for (const paso of pasosSig) {
-        if (paso.tipo === 'MSG' && !proximoMSG) {
-          proximoMSG = paso; break
-        }
-        if (paso.tipo === 'NOTIFY') notifysAhora.push(paso)
+        if (paso.tipo === 'NOTIFY') { notifysAhora.push(paso); continue }
+        if (paso.tipo === 'MSG' && !proximoMSG) { proximoMSG = paso; break }
       }
 
-      // Hay próximo MSG → enviarlo
       if (proximoMSG) {
         for (const notify of notifysAhora) {
-          if (conv.vendor_phone) {
-            await enviarVendedor(instancia, conv.vendor_phone, interp(notify.mensaje, vars))
+          if (conv.vendor?.whatsappNumber) {
+            await enviarVendedor(instancia, conv.vendor.whatsappNumber, interp(notify.mensaje, vars))
           }
         }
-
         const msgLead = interp(proximoMSG.mensaje, vars)
-        await enviarLead(instancia, conv.telefono, msgLead)
-        await guardarMsg(prisma, Number(conv.lead_id), Number(conv.id), msgLead)
-
-        await updateConv(prisma, Number(conv.id), {
-          current_step: proximoMSG.orden,
-          last_bot_message_at: new Date()
+        await enviarLead(instancia, conv.lead.telefono, msgLead)
+        await guardarMsg(prisma, conv.leadId, conv.id, msgLead)
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: { currentStep: proximoMSG.orden, lastBotMessageAt: new Date(), updatedAt: new Date() }
         })
         await prisma.lead.update({
-          where: { id: Number(conv.lead_id) },
+          where: { id: conv.leadId },
           data: { pasoActual: proximoMSG.orden, ultimoMensaje: new Date() }
         }).catch(() => {})
-
         procesados++
-        console.log(`[Followup] Avanzó paso ${proximoMSG.orden}: ${conv.telefono}`)
+        console.log(`[Followup] Paso ${proximoMSG.orden}: ${conv.lead.telefono}`)
         continue
       }
 
-      // No hay más MSGs → Notificar vendedor → NOTIFIED
-      // GUARD: solo notificar si vendor_notification_count == 0
-      if (Number(conv.vendor_notification_count) === 0) {
+      // Sin más pasos MSG → notificar vendedor → NOTIFIED
+      if (conv.vendorNotificationCount === 0) {
         for (const notify of notifysAhora) {
-          if (conv.vendor_phone) {
-            await enviarVendedor(instancia, conv.vendor_phone, interp(notify.mensaje, vars))
+          if (conv.vendor?.whatsappNumber) {
+            await enviarVendedor(instancia, conv.vendor.whatsappNumber, interp(notify.mensaje, vars))
           }
         }
 
-        if (notifysAhora.length === 0 && conv.vendor_phone) {
-          const prioEmoji = clasif.prioridad === 'URGENTE' ? '🔴' :
-                            clasif.prioridad === 'ALTA'    ? '🟠' : '🟡'
+        if (notifysAhora.length === 0 && conv.vendor?.whatsappNumber) {
+          const prioEmoji = clasif.prioridad === 'URGENTE' ? '🔴' : clasif.prioridad === 'ALTA' ? '🟠' : '🟡'
           const msgVendedor =
             `${prioEmoji} NUEVO LEAD — ${clasif.prioridad}\n\n` +
-            `📱 wa.me/${conv.telefono}\n` +
-            `👤 ${clasif.nombre   || 'Sin nombre'}\n` +
+            `📱 wa.me/${conv.lead.telefono}\n` +
+            `👤 ${clasif.nombre || 'Sin nombre'}\n` +
             `📦 ${clasif.producto || 'Sin producto'}\n` +
             `🎯 ${clasif.tipoPreciso || ''}\n` +
-            `📚 ${conv.campaign_nombre || 'orgánico'}\n` +
+            `📚 ${conv.campaign?.nombre || 'orgánico'}\n` +
             (historial ? `\n💬 Dijo:\n${historial}\n` : '') +
             `\n⚡ ${clasif.prioridad === 'URGENTE' ? '¡Llama AHORA!' : 'Llama hoy'}`
-          await enviarVendedor(instancia, conv.vendor_phone, msgVendedor)
+          await enviarVendedor(instancia, conv.vendor.whatsappNumber, msgVendedor)
         }
 
-        // Google Sheets
-        const mensajesTexto = mensajes.map(m => m.texto).join(' | ')
         await escribirEnSheets({
-          accion: 'nuevo', telefono: conv.telefono,
+          accion: 'nuevo', telefono: conv.lead.telefono,
           msgInicial: mensajes[0]?.texto || '',
-          mensajes: mensajesTexto,
+          mensajes: mensajes.map(m => m.texto).join(' | '),
           nombre: clasif.nombre || '', producto: clasif.producto || '',
           perfil: clasif.tipoPreciso, prioridad: clasif.prioridad,
           estado: 'pendiente llamar',
-          vendedor: conv.vendor_nombre || '',
-          campana: conv.campaign_nombre || ''
+          vendedor: conv.vendor?.nombre || '',
+          campana: conv.campaign?.nombre || ''
         })
       }
 
-      // Marcar NOTIFIED en conversation Y en lead
-      await updateConv(prisma, Number(conv.id), {
-        state: 'NOTIFIED',
-        vendor_notified_at: new Date(),
-        vendor_notification_count: Number(conv.vendor_notification_count) + 1
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: {
+          state: 'NOTIFIED',
+          vendorNotifiedAt: new Date(),
+          vendorNotificationCount: conv.vendorNotificationCount + 1,
+          updatedAt: new Date()
+        }
       })
       await prisma.lead.update({
-        where: { id: Number(conv.lead_id) },
+        where: { id: conv.leadId },
         data: { estado: 'NOTIFICADO', ultimoMensaje: new Date() }
       }).catch(() => {})
 
       procesados++
-      console.log(`[Followup] NOTIFIED: ${conv.telefono} | ${clasif.tipoPreciso} | ${clasif.prioridad}`)
+      console.log(`[Followup] NOTIFIED: ${conv.lead.telefono} | ${clasif.tipoPreciso} | ${clasif.prioridad}`)
 
     } catch (err) {
       console.error(`[Followup] Error conv ${conv.id}:`, err.message)
@@ -267,75 +234,118 @@ export async function ejecutarFollowup(prisma) {
   }
 
   // ══════════════════════════════════════════════════════════
-  // FASE 2: Reactivaciones con GUARD anti-loop
-  // REGLA: max MAX_REACTIVACIONES, esperar MIN_ENTRE_REACTIVA min
+  // FASE 2: FOLLOWUP steps (ventana ampliada a 5 min)
+  // Fix Bug 8: era 2 min, ahora 5 min para no perderse con el cron
   // ══════════════════════════════════════════════════════════
-  const convsParaReactivar = await prisma.$queryRawUnsafe(`
-    SELECT c.*, l.telefono, l."pasoActual",
-           v."whatsappNumber" AS vendor_phone, v.nombre AS vendor_nombre,
-           v."instanciaEvolution" AS instancia,
-           cam.nombre AS campaign_nombre
-    FROM conversations c
-    JOIN leads l ON l.id = c.lead_id
-    LEFT JOIN vendors v ON v.id = c.vendor_id
-    LEFT JOIN campaigns cam ON cam.id = c.campaign_id
-    WHERE c.state = 'NOTIFIED'
-      AND c.reactivation_count < ${MAX_REACTIVACIONES}
-      AND (
-        c.last_reactivation_at IS NULL
-        OR c.last_reactivation_at < NOW() - INTERVAL '${MIN_ENTRE_REACTIVA} minutes'
-      )
-      AND c.last_lead_message_at < NOW() - INTERVAL '30 minutes'
-  `)
+  const convsFollowup = await prisma.conversation.findMany({
+    where: { state: { in: ['ACTIVE', 'REACTIVATED'] }, campaignId: { not: null } },
+    include: {
+      lead: true,
+      campaign: { include: { steps: { orderBy: { orden: 'asc' } } } },
+      vendor: true
+    }
+  })
 
-  for (const conv of convsParaReactivar) {
+  for (const conv of convsFollowup) {
     try {
-      const instancia = conv.instancia
+      const instancia = conv.vendor?.instanciaEvolution
       if (!instancia) continue
 
-      const ultimoTs  = conv.last_lead_message_at
-        ? new Date(conv.last_lead_message_at).getTime()
-        : new Date(conv.created_at).getTime()
-      const minutos = Math.floor((ahora - ultimoTs) / 60000)
-      const reactCount = Number(conv.reactivation_count)
+      const ultimoTs = conv.lastLeadMessageAt
+        ? new Date(conv.lastLeadMessageAt).getTime() : 0
+      const horasSilencio = (ahora.getTime() - ultimoTs) / 3600000
+      const pasoActual = conv.currentStep || 0
 
-      // 48h → frío definitivo (no más reactivaciones)
+      const followup = conv.campaign?.steps?.find(s =>
+        s.tipo === 'FOLLOWUP' &&
+        s.orden > pasoActual &&
+        s.followupHrs &&
+        horasSilencio >= s.followupHrs &&
+        horasSilencio < s.followupHrs + (5 / 60) // ← ventana 5 minutos (era 2)
+      )
+      if (!followup) continue
+
+      const vars = {
+        nombre:   conv.lead.nombreDetectado || conv.lead.telefono,
+        producto: conv.lead.productoDetectado || 'tu producto',
+        telefono: conv.lead.telefono,
+        vendedor: conv.vendor?.nombre || '',
+        curso:    conv.campaign?.nombre || '',
+        historial: ''
+      }
+
+      const msgFollowup = interp(followup.mensaje, vars)
+      await enviarLead(instancia, conv.lead.telefono, msgFollowup)
+      await guardarMsg(prisma, conv.leadId, conv.id, msgFollowup)
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: { currentStep: followup.orden, lastBotMessageAt: new Date(), updatedAt: new Date() }
+      })
+      await prisma.lead.update({
+        where: { id: conv.leadId },
+        data: { pasoActual: followup.orden, ultimoMensaje: new Date() }
+      }).catch(() => {})
+
+      procesados++
+      console.log(`[Followup] FOLLOWUP ${followup.followupHrs}h: ${conv.lead.telefono}`)
+    } catch (err) {
+      console.error(`[Followup] Error followup step ${conv.id}:`, err.message)
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // FASE 3: Reactivaciones anti-loop
+  // ══════════════════════════════════════════════════════════
+  const convsReactivar = await prisma.conversation.findMany({
+    where: {
+      state: 'NOTIFIED',
+      reactivationCount: { lt: MAX_REACTIVACIONES },
+      lastLeadMessageAt: { lt: new Date(ahora.getTime() - 30 * 60 * 1000) },
+      OR: [
+        { lastReactivationAt: null },
+        { lastReactivationAt: { lt: new Date(ahora.getTime() - MIN_ENTRE_REACTIVA * 60 * 1000) } }
+      ]
+    },
+    include: { lead: true, vendor: true, campaign: true }
+  })
+
+  for (const conv of convsReactivar) {
+    try {
+      const instancia = conv.vendor?.instanciaEvolution
+      if (!instancia) continue
+
+      const ultimoTs = conv.lastLeadMessageAt
+        ? new Date(conv.lastLeadMessageAt).getTime()
+        : new Date(conv.createdAt).getTime()
+      const minutos = Math.floor((ahora.getTime() - ultimoTs) / 60000)
+      const reactCount = conv.reactivationCount
+
       if (minutos >= 2880) {
-        await updateConv(prisma, Number(conv.id), { state: 'CLOSED' })
-        await prisma.lead.update({
-          where: { id: Number(conv.lead_id) },
-          data: { estado: 'CERRADO' }
-        }).catch(() => {})
-        console.log(`[Followup] CLOSED (frío 48h): ${conv.telefono}`)
+        await prisma.conversation.update({ where: { id: conv.id }, data: { state: 'CLOSED', updatedAt: new Date() } })
+        await prisma.lead.update({ where: { id: conv.leadId }, data: { estado: 'CERRADO' } }).catch(() => {})
+        console.log(`[Followup] CLOSED (48h): ${conv.lead.telefono}`)
         continue
       }
 
       let msg = null
       let alertVendedor = null
 
-      // 24h → reactivación
       if (minutos >= 1440 && reactCount === 0) {
-        msg = `¡Hola! 👋 Qué gusto saber de ti de nuevo.\n\nTenemos nuevas fechas para *Mi Primera Exportación*.\n\n¿Sigues interesado/a? 😊`
-        alertVendedor = `🔄 Lead reactivado +24h\n📱 wa.me/${conv.telefono}`
-      }
-      // 2h → urgencia (solo en reactivación 1)
-      else if (minutos >= 120 && minutos < 180 && reactCount === 0) {
+        msg = `¡Hola! 👋 Qué gusto saber de ti de nuevo.\n\nTenemos nuevas fechas disponibles.\n\n¿Sigues interesado/a? 😊`
+        alertVendedor = `🔄 Lead reactivado +24h\n📱 wa.me/${conv.lead.telefono}`
+      } else if (minutos >= 120 && minutos < 180 && reactCount === 0) {
         msg = `Hola! 🙏\n\nLamentamos la espera. Ya escalé tu caso como urgente.\n\nUn asesor te llama hoy sin falta. ¿A qué hora te viene mejor? 👇`
-        alertVendedor = `⚠️ URGENTE — Lead lleva 2h esperando\n📱 wa.me/${conv.telefono}`
-      }
-      // 1h → seguimiento suave (solo una vez)
-      else if (minutos >= 60 && minutos < 62 && reactCount === 0) {
+        alertVendedor = `⚠️ URGENTE — Lead lleva 2h esperando\n📱 wa.me/${conv.lead.telefono}`
+      } else if (minutos >= 60 && minutos < 65 && reactCount === 0) {
         msg = `Hola de nuevo! 😊\n\nYa le recordé a tu asesor — te contacta hoy.\n\n¿A qué hora te viene mejor? 👇`
-        alertVendedor = `📌 Lead lleva 1h esperando\n📱 wa.me/${conv.telefono}`
-      }
-      // 30min → alerta silenciosa al vendedor (solo una vez)
-      else if (minutos >= 30 && minutos < 32 && reactCount === 0) {
-        if (conv.vendor_phone) {
-          await enviarVendedor(instancia, conv.vendor_phone, `🔔 Lead lleva 30min esperando tu llamada\n📱 wa.me/${conv.telefono}`)
+        alertVendedor = `📌 Lead lleva 1h esperando\n📱 wa.me/${conv.lead.telefono}`
+      } else if (minutos >= 30 && minutos < 35 && reactCount === 0) {
+        if (conv.vendor?.whatsappNumber) {
+          await enviarVendedor(instancia, conv.vendor.whatsappNumber, `🔔 Lead lleva 30min esperando\n📱 wa.me/${conv.lead.telefono}`)
         }
-        await updateConv(prisma, Number(conv.id), {
-          reactivation_count: reactCount + 1,
-          last_reactivation_at: new Date()
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: { reactivationCount: reactCount + 1, lastReactivationAt: new Date(), updatedAt: new Date() }
         })
         procesados++
         continue
@@ -343,94 +353,27 @@ export async function ejecutarFollowup(prisma) {
 
       if (!msg) continue
 
-      // Enviar mensaje al lead
-      await enviarLead(instancia, conv.telefono, msg)
-      await guardarMsg(prisma, Number(conv.lead_id), Number(conv.id), msg)
-
-      if (alertVendedor && conv.vendor_phone) {
-        await enviarVendedor(instancia, conv.vendor_phone, alertVendedor)
+      await enviarLead(instancia, conv.lead.telefono, msg)
+      await guardarMsg(prisma, conv.leadId, conv.id, msg)
+      if (alertVendedor && conv.vendor?.whatsappNumber) {
+        await enviarVendedor(instancia, conv.vendor.whatsappNumber, alertVendedor)
       }
 
-      // Actualizar conversation — incrementar contador, NO resetear current_step
-      await updateConv(prisma, Number(conv.id), {
-        reactivation_count: reactCount + 1,
-        last_reactivation_at: new Date(),
-        last_bot_message_at: new Date()
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: {
+          reactivationCount: reactCount + 1,
+          lastReactivationAt: new Date(),
+          lastBotMessageAt: new Date(),
+          updatedAt: new Date()
+        }
       })
 
       procesados++
-      console.log(`[Followup] Reactivación #${reactCount + 1}: ${conv.telefono}`)
+      console.log(`[Followup] Reactivación #${reactCount + 1}: ${conv.lead.telefono}`)
 
     } catch (err) {
       console.error(`[Followup] Error reactivando ${conv.id}:`, err.message)
-    }
-  }
-
-  // ══════════════════════════════════════════════════════════
-  // FASE 3: FOLLOWUP steps del FlowBuilder
-  // ══════════════════════════════════════════════════════════
-  const convsFollowup = await prisma.$queryRawUnsafe(`
-    SELECT c.*, l.telefono, l."pasoActual", l."nombreDetectado", l."productoDetectado",
-           v."whatsappNumber" AS vendor_phone, v.nombre AS vendor_nombre,
-           v."instanciaEvolution" AS instancia,
-           cam.nombre AS campaign_nombre
-    FROM conversations c
-    JOIN leads l ON l.id = c.lead_id
-    LEFT JOIN vendors v ON v.id = c.vendor_id
-    LEFT JOIN campaigns cam ON cam.id = c.campaign_id
-    WHERE c.state IN ('ACTIVE', 'REACTIVATED')
-  `)
-
-  for (const conv of convsFollowup) {
-    try {
-      const instancia = conv.instancia
-      if (!instancia || !conv.campaign_id) continue
-
-      const campaign = await prisma.campaign.findUnique({
-        where: { id: Number(conv.campaign_id) },
-        include: { steps: { orderBy: { orden: 'asc' } } }
-      })
-      if (!campaign) continue
-
-      const ultimoTs = conv.last_lead_message_at
-        ? new Date(conv.last_lead_message_at).getTime() : 0
-      const horasSilencio = (ahora - ultimoTs) / 3600000
-      const pasoActual = Number(conv.current_step) || 0
-
-      const followup = campaign.steps.find(s =>
-        s.tipo === 'FOLLOWUP' &&
-        s.orden > pasoActual &&
-        s.followupHrs &&
-        horasSilencio >= s.followupHrs &&
-        horasSilencio < s.followupHrs + (2 / 60) // ventana 2 min
-      )
-      if (!followup) continue
-
-      const vars = {
-        nombre:   conv.nombreDetectado || conv.telefono,
-        producto: conv.productoDetectado || 'tu producto',
-        telefono: conv.telefono,
-        vendedor: conv.vendor_nombre || '',
-        curso:    conv.campaign_nombre || '',
-        historial: ''
-      }
-
-      const msgFollowup = interp(followup.mensaje, vars)
-      await enviarLead(instancia, conv.telefono, msgFollowup)
-      await guardarMsg(prisma, Number(conv.lead_id), Number(conv.id), msgFollowup)
-      await updateConv(prisma, Number(conv.id), {
-        current_step: followup.orden,
-        last_bot_message_at: new Date()
-      })
-      await prisma.lead.update({
-        where: { id: Number(conv.lead_id) },
-        data: { pasoActual: followup.orden, ultimoMensaje: new Date() }
-      }).catch(() => {})
-
-      procesados++
-      console.log(`[Followup] FOLLOWUP ${followup.followupHrs}h: ${conv.telefono}`)
-    } catch (err) {
-      console.error(`[Followup] Error followup step ${conv.id}:`, err.message)
     }
   }
 
