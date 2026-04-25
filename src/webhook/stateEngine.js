@@ -120,14 +120,17 @@ async function avanzarSiguientePaso(prisma, conv, campaign, vendor, instancia) {
     }
 
     const msgLead = interp(proximoMSG.mensaje, vars)
-    await sleep(800) // pequeña pausa natural antes de responder
-    await enviarTexto(instancia, conv.lead?.telefono, msgLead)
-    await guardarMsg(prisma, conv.leadId, conv.id, 'BOT', msgLead)
 
+    // CRÍTICO: marcar lastBotMessageAt ANTES de enviar
+    // Esto evita que el cron dispare el mismo paso mientras enviamos
     await prisma.conversation.update({
       where: { id: conv.id },
       data: { currentStep: proximoMSG.orden, lastBotMessageAt: new Date() }
     })
+
+    await sleep(800) // pequeña pausa natural antes de responder
+    await enviarTexto(instancia, conv.lead?.telefono, msgLead)
+    await guardarMsg(prisma, conv.leadId, conv.id, 'BOT', msgLead)
     await prisma.lead.update({
       where: { id: conv.leadId },
       data: { pasoActual: proximoMSG.orden, ultimoMensaje: new Date() }
