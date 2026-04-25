@@ -1,13 +1,16 @@
-// src/webhook/handler.js — Sprint 5
-// Fix velocidad: debounce 1.5s (era 3s)
-// Fix acumulación: los mensajes del lead se concatenan en el debounce
-// Fix: usa llama-3.1-8b-instant para respuestas más rápidas
+// src/webhook/handler.js — Sprint 5 DEFINITIVO
+// Estrategia: timer 5s robusto + presence.update como bonus opcional
+// Sin depender de eventos inconsistentes de Baileys
+// Cubre: rápido, despacio, largo, público 40+, con/sin presence.update
 
 import { procesarConMotor } from './stateEngine.js'
 
 const mensajesProcesados = new Set()
-const debounceMap = new Map()
-const acumuladorMap = new Map() // acumula textos del mismo número
+const debounceMap        = new Map()
+const acumuladorMap      = new Map()
+const callbackMap        = new Map()
+
+const TYPING_WINDOW_MS = 5000 // 5s — estándar para LATAM público 40+
 
 function yaFueProcesado(messageId) {
   if (!messageId) return false
@@ -17,31 +20,29 @@ function yaFueProcesado(messageId) {
   return false
 }
 
-// Acumula mensajes del mismo número en ventana de 1.5s
-// Si el lead escribe 3 mensajes seguidos → se procesan como uno solo
-function acumularYEsperar(numero, texto, tieneImagen, callback) {
-  // Acumular texto
-  if (texto) {
-    const prev = acumuladorMap.get(numero) || ''
-    acumuladorMap.set(numero, prev ? prev + ' ' + texto : texto)
-  }
-  if (tieneImagen) {
-    acumuladorMap.set(numero + '_img', true)
-  }
-
-  // Resetear timer
+function programarDisparo(numero, ms) {
   if (debounceMap.has(numero)) clearTimeout(debounceMap.get(numero))
-
   const timer = setTimeout(() => {
     debounceMap.delete(numero)
-    const textoAcumulado = acumuladorMap.get(numero) || ''
-    const imagenAcumulada = acumuladorMap.get(numero + '_img') || false
+    const textoFinal  = acumuladorMap.get(numero) || ''
+    const imagenFinal = acumuladorMap.get(`${numero}_img`) || false
+    const cb = callbackMap.get(numero)
     acumuladorMap.delete(numero)
-    acumuladorMap.delete(numero + '_img')
-    callback(textoAcumulado, imagenAcumulada)
-  }, 1500) // 1.5s — era 3s
-
+    acumuladorMap.delete(`${numero}_img`)
+    callbackMap.delete(numero)
+    if (cb && (textoFinal || imagenFinal)) cb(textoFinal, imagenFinal)
+  }, ms)
   debounceMap.set(numero, timer)
+}
+
+function acumularYEsperar(numero, texto, tieneImagen, callback) {
+  if (texto) {
+    const prev = acumuladorMap.get(numero) || ''
+    acumuladorMap.set(numero, prev ? `${prev} ${texto}` : texto)
+  }
+  if (tieneImagen) acumuladorMap.set(`${numero}_img`, true)
+  callbackMap.set(numero, callback)
+  programarDisparo(numero, TYPING_WINDOW_MS)
 }
 
 async function getVendorPorInstancia(prisma, instancia) {
@@ -52,15 +53,31 @@ async function getVendorPorInstancia(prisma, instancia) {
 
 export async function handleWebhook(request, reply, prisma) {
   try {
-    const body = request.body
+    const body      = request.body
+    const instancia = body.instance
+
+    // presence.update — BONUS opcional, no crítico
+    // Si llega "composing" → resetear timer (lead sigue escribiendo)
+    // Si no llega → el timer de 5s maneja todo igual
+    if (body.event === 'presence.update' && body.data) {
+      const items = Array.isArray(body.data) ? body.data : [body.data]
+      for (const item of items) {
+        const numero = item.id?.replace('@s.whatsapp.net', '')
+        if (!numero) continue
+        const estado = item.presences?.[item.id]?.lastKnownPresence
+        // Solo resetear si hay texto acumulado esperando
+        if (estado === 'composing' && acumuladorMap.has(numero)) {
+          programarDisparo(numero, TYPING_WINDOW_MS)
+        }
+      }
+      return reply.send({ status: 'ok' })
+    }
 
     if (body.event !== 'messages.upsert' || !body.data) {
       return reply.send({ status: 'ignored' })
     }
 
     const msg = Array.isArray(body.data) ? body.data[0] : body.data
-    const instancia = body.instance
-
     if (msg.key?.fromMe) return reply.send({ status: 'ignored' })
 
     const numero = msg.key?.remoteJid?.replace('@s.whatsapp.net', '')
@@ -83,7 +100,6 @@ export async function handleWebhook(request, reply, prisma) {
 
     if (!texto && !tieneImagen) return reply.send({ status: 'ignored' })
 
-    // Responder inmediato — Evolution API no espera más de 10s
     reply.send({ status: 'received' })
 
     const vendor = await getVendorPorInstancia(prisma, instancia)
@@ -92,10 +108,14 @@ export async function handleWebhook(request, reply, prisma) {
       return
     }
 
-    // Acumular y procesar con debounce 1.5s
     acumularYEsperar(numero, texto, tieneImagen, (textoFinal, imagenFinal) => {
-      procesarConMotor({ prisma, instancia, numero, texto: textoFinal, tieneImagen: imagenFinal, vendor })
-        .catch(err => console.error('[Handler] Error en motor:', err.message))
+      console.log(`[Handler] → ${numero}: "${textoFinal.slice(0, 80)}"`)
+      procesarConMotor({
+        prisma, instancia, numero,
+        texto: textoFinal,
+        tieneImagen: imagenFinal,
+        vendor
+      }).catch(err => console.error('[Handler] Error:', err.message))
     })
 
   } catch (error) {
