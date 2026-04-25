@@ -67,6 +67,7 @@ async function cerrarConversacion(prisma, conv, lead) {
 async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor, texto }) {
   await prisma.conversation.update({
     where: { id: conv.id },
+    data: { lastLeadMessageAt: new Date().toISOString() }
   })
 
   if (contiene(texto, KW_NO_INTERES)) {
@@ -144,6 +145,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
       if (conv) {
         await prisma.conversation.update({
           where: { id: conv.id },
+          data: { lastLeadMessageAt: new Date().toISOString() }
         })
       }
 
