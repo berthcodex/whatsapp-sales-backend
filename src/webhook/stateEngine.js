@@ -56,7 +56,6 @@ async function cerrarConversacion(prisma, conv, lead) {
   await Promise.all([
     prisma.conversation.update({
       where: { id: conv.id },
-      data: { state: 'CLOSED', updatedAt: new Date().toISOString() }
     }),
     prisma.lead.update({
       where: { id: lead.id },
@@ -68,7 +67,6 @@ async function cerrarConversacion(prisma, conv, lead) {
 async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor, texto }) {
   await prisma.conversation.update({
     where: { id: conv.id },
-    data: { lastLeadMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
   })
 
   if (contiene(texto, KW_NO_INTERES)) {
@@ -133,7 +131,7 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
     if (lead) {
       const conv = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
-        orderBy: { updatedAt: 'desc' }
+        orderBy: { createdAt: 'desc' }
       })
 
       await guardarMensaje(prisma, {
@@ -146,7 +144,6 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
       if (conv) {
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { lastLeadMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
         })
       }
 
@@ -248,7 +245,6 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         data: {
           currentStep: pasoBienvenida?.orden || 1,
           lastBotMessageAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
         }
       })
     }
