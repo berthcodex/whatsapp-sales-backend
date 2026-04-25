@@ -9,35 +9,37 @@ datasource db {
 
 // ─── Vendedores ───────────────────────────────────────────────
 model Vendor {
-  id                 Int        @id @default(autoincrement())
+  id                 Int            @id @default(autoincrement())
   nombre             String
-  telefono           String     @unique
-  role               String     @default("VENDOR")
-  activo             Boolean    @default(true)
+  telefono           String         @unique
+  role               String         @default("VENDOR")
+  activo             Boolean        @default(true)
   instanciaEvolution String?
-  whatsappNumber     String?    @unique
-  pin                String?    @default("0000")
+  whatsappNumber     String?        @unique
+  pin                String?        @default("0000")
   campaigns          Campaign[]
   leads              Lead[]
-  createdAt          DateTime   @default(now())
-  updatedAt          DateTime   @updatedAt
+  conversations      Conversation[]
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
   @@map("vendors")
 }
 
 // ─── Campañas ─────────────────────────────────────────────────
 model Campaign {
-  id        Int        @id @default(autoincrement())
-  slug      String     @unique
-  nombre    String
-  activa    Boolean    @default(true)
-  vendorId  Int
-  vendor    Vendor     @relation(fields: [vendorId], references: [id])
-  triggers  Trigger[]
-  steps     FlowStep[]
-  leads     Lead[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id            Int            @id @default(autoincrement())
+  slug          String         @unique
+  nombre        String
+  activa        Boolean        @default(true)
+  vendorId      Int
+  vendor        Vendor         @relation(fields: [vendorId], references: [id])
+  triggers      Trigger[]
+  steps         FlowStep[]
+  leads         Lead[]
+  conversations Conversation[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   @@map("campaigns")
 }
@@ -68,34 +70,81 @@ model FlowStep {
 
 // ─── Leads ────────────────────────────────────────────────────
 model Lead {
-  id                Int       @id @default(autoincrement())
-  telefono          String    @unique
+  id                Int            @id @default(autoincrement())
+  telefono          String         @unique
   campaignId        Int?
-  campaign          Campaign? @relation(fields: [campaignId], references: [id])
+  campaign          Campaign?      @relation(fields: [campaignId], references: [id])
   vendorId          Int?
-  vendor            Vendor?   @relation(fields: [vendorId], references: [id])
-  pasoActual        Int       @default(0)
+  vendor            Vendor?        @relation(fields: [vendorId], references: [id])
+  pasoActual        Int            @default(0)
   ultimoMensaje     DateTime?
-  notificado        Boolean   @default(false)
-  estado            String    @default("NUEVO")
+  notificado        Boolean        @default(false)
+  estado            String         @default("NUEVO")
   nombreDetectado   String?
   productoDetectado String?
   mensajes          Message[]
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  conversations     Conversation[]
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
 
   @@map("leads")
 }
 
+// ─── Conversaciones (fuente de verdad del bot) ────────────────
+model Conversation {
+  id                      Int       @id @default(autoincrement())
+  leadId                  Int
+  lead                    Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  campaignId              Int?
+  campaign                Campaign? @relation(fields: [campaignId], references: [id])
+  vendorId                Int?
+  vendor                  Vendor?   @relation(fields: [vendorId], references: [id])
+  state                   String    @default("ACTIVE") // ACTIVE | NOTIFIED | CLOSED | REACTIVATED
+  currentStep             Int       @default(0)
+  lastBotMessageAt        DateTime?
+  lastLeadMessageAt       DateTime?
+  reactivationCount       Int       @default(0)
+  lastReactivationAt      DateTime?
+  vendorNotifiedAt        DateTime?
+  vendorNotificationCount Int       @default(0)
+  reminderJobId           String?
+  messages                Message[]
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([leadId, campaignId])
+  @@map("conversations")
+}
+
 // ─── Historial de mensajes ────────────────────────────────────
 model Message {
-  id              Int      @id @default(autoincrement())
-  leadId          Int
-  lead            Lead     @relation(fields: [leadId], references: [id])
-  conversation_id Int?     // FK a tabla conversations (creada vía SQL migration)
-  origen          String   // LEAD | BOT | VENDEDOR
-  texto           String   @db.Text
-  createdAt       DateTime @default(now())
+  id             Int           @id @default(autoincrement())
+  leadId         Int
+  lead           Lead          @relation(fields: [leadId], references: [id])
+  conversationId Int?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+  origen         String        // LEAD | BOT | VENDEDOR
+  texto          String        @db.Text
+  createdAt      DateTime      @default(now())
 
   @@map("messages")
+}
+
+// ─── Configuración del bot ────────────────────────────────────
+model BotConfig {
+  id              Int      @id @default(autoincrement())
+  tenantId        String   @default("hidata")
+  activo          Boolean  @default(true)
+  msgBienvenida   String?  @db.Text
+  msgProducto     String?  @db.Text
+  msgExperiencia  String?  @db.Text
+  msgPresentacion String?  @db.Text
+  msgObjecion     String?  @db.Text
+  msgUrgencia     String?  @db.Text
+  msgHandoff      String?  @db.Text
+  nombreEmpresa   String?
+  nombreProducto  String?
+  updatedEn       DateTime @default(now())
+
+  @@map("bot_config")
 }
