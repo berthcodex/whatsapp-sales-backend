@@ -166,11 +166,11 @@ export async function ejecutarFollowup(prisma) {
         await guardarMsg(prisma, conv.leadId, conv.id, msgLead)
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { currentStep: proximoMSG.orden, lastBotMessageAt: new Date(), updatedAt: new Date() }
+          data: { currentStep: proximoMSG.orden, lastBotMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
         })
         await prisma.lead.update({
           where: { id: conv.leadId },
-          data: { pasoActual: proximoMSG.orden, ultimoMensaje: new Date() }
+          data: { pasoActual: proximoMSG.orden, ultimoMensaje: new Date().toISOString() }
         }).catch(() => {})
         procesados++
         console.log(`[Followup] Paso ${proximoMSG.orden}: ${conv.lead.telefono}`)
@@ -215,14 +215,14 @@ export async function ejecutarFollowup(prisma) {
         where: { id: conv.id },
         data: {
           state: 'NOTIFIED',
-          vendorNotifiedAt: new Date(),
+          vendorNotifiedAt: new Date().toISOString(),
           vendorNotificationCount: conv.vendorNotificationCount + 1,
-          updatedAt: new Date()
+          updatedAt: new Date().toISOString()
         }
       })
       await prisma.lead.update({
         where: { id: conv.leadId },
-        data: { estado: 'NOTIFICADO', ultimoMensaje: new Date() }
+        data: { estado: 'NOTIFICADO', ultimoMensaje: new Date().toISOString() }
       }).catch(() => {})
 
       procesados++
@@ -279,11 +279,11 @@ export async function ejecutarFollowup(prisma) {
       await guardarMsg(prisma, conv.leadId, conv.id, msgFollowup)
       await prisma.conversation.update({
         where: { id: conv.id },
-        data: { currentStep: followup.orden, lastBotMessageAt: new Date(), updatedAt: new Date() }
+        data: { currentStep: followup.orden, lastBotMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
       })
       await prisma.lead.update({
         where: { id: conv.leadId },
-        data: { pasoActual: followup.orden, ultimoMensaje: new Date() }
+        data: { pasoActual: followup.orden, ultimoMensaje: new Date().toISOString() }
       }).catch(() => {})
 
       procesados++
@@ -321,7 +321,7 @@ export async function ejecutarFollowup(prisma) {
       const reactCount = conv.reactivationCount
 
       if (minutos >= 2880) {
-        await prisma.conversation.update({ where: { id: conv.id }, data: { state: 'CLOSED', updatedAt: new Date() } })
+        await prisma.conversation.update({ where: { id: conv.id }, data: { state: 'CLOSED', updatedAt: new Date().toISOString() } })
         await prisma.lead.update({ where: { id: conv.leadId }, data: { estado: 'CERRADO' } }).catch(() => {})
         console.log(`[Followup] CLOSED (48h): ${conv.lead.telefono}`)
         continue
@@ -345,7 +345,7 @@ export async function ejecutarFollowup(prisma) {
         }
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { reactivationCount: reactCount + 1, lastReactivationAt: new Date(), updatedAt: new Date() }
+          data: { reactivationCount: reactCount + 1, lastReactivationAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
         })
         procesados++
         continue
@@ -363,9 +363,9 @@ export async function ejecutarFollowup(prisma) {
         where: { id: conv.id },
         data: {
           reactivationCount: reactCount + 1,
-          lastReactivationAt: new Date(),
-          lastBotMessageAt: new Date(),
-          updatedAt: new Date()
+          lastReactivationAt: new Date().toISOString(),
+          lastBotMessageAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
         }
       })
 
