@@ -1,7 +1,8 @@
-// src/webhook/stateEngine.js — Sprint 5
-// FIX VELOCIDAD: respuesta inmediata en webhook, no esperar al cron
-// El stateEngine ahora avanza pasos MSG directamente cuando el lead responde
-// El cron solo maneja: followups de tiempo, reactivaciones, alertas por silencio
+// src/webhook/stateEngine.js — Sprint 5 ESTABLE
+// ARQUITECTURA CORRECTA:
+// stateEngine  → solo guarda mensaje + actualiza timestamp
+// followupEngine → avanza pasos (20s de silencio)
+// Esta separación evita el choque entre los dos procesos
 
 import { detectarCursoCampana } from './classifier.js'
 import { enviarTexto } from '../whatsapp/sender.js'
@@ -54,101 +55,6 @@ function interp(msg, vars) {
     .replace(/\{\{curso\}\}/g,    vars.curso     || '')
 }
 
-// ── Avanzar al siguiente paso MSG inmediatamente ──────────────
-// Esta función reemplaza al cron para los pasos secuenciales
-async function avanzarSiguientePaso(prisma, conv, campaign, vendor, instancia) {
-  try {
-    const steps    = campaign?.steps || []
-    const pasoActual = conv.currentStep || 0
-    const pasosSig = steps.filter(s => s.orden > pasoActual)
-
-    let proximoMSG = null
-    const notifys  = []
-
-    for (const paso of pasosSig) {
-      if (paso.tipo === 'NOTIFY') { notifys.push(paso); continue }
-      if (paso.tipo === 'MSG' && !proximoMSG) { proximoMSG = paso; break }
-      if (paso.tipo === 'FOLLOWUP') break // FOLLOWUP lo maneja el cron
-    }
-
-    if (!proximoMSG) {
-      // No hay más pasos MSG → notificar vendedor si no fue notificado
-      if (conv.vendorNotificationCount === 0 && vendor?.whatsappNumber) {
-        const mensajes = await prisma.message.findMany({
-          where: { leadId: conv.leadId, origen: 'LEAD' },
-          orderBy: { createdAt: 'asc' }
-        })
-        const historial = mensajes.map(m => `  > "${m.texto.slice(0, 80)}"`).join('\n')
-
-        // Enviar NOTIFYs del flujo
-        for (const n of notifys) {
-          await enviarTexto(instancia, vendor.whatsappNumber,
-            interp(n.mensaje, { telefono: conv.lead?.telefono || '', vendedor: vendor.nombre || '', curso: campaign?.nombre || '', nombre: conv.lead?.nombreDetectado || '' })
-          ).catch(() => {})
-        }
-
-        // Notificación default si no hay NOTIFY en el flujo
-        if (notifys.length === 0) {
-          const msgV = `🟡 NUEVO LEAD\n\n📱 wa.me/${conv.lead?.telefono}\n👤 ${conv.lead?.nombreDetectado || 'Sin nombre'}\n📦 ${conv.lead?.productoDetectado || 'Sin producto'}\n📚 ${campaign?.nombre || 'orgánico'}\n${historial ? `\n💬 Dijo:\n${historial}` : ''}\n\n⚡ Llama hoy`
-          await enviarTexto(instancia, vendor.whatsappNumber, msgV).catch(() => {})
-        }
-
-        await prisma.conversation.update({
-          where: { id: conv.id },
-          data: {
-            state: 'NOTIFIED',
-            vendorNotifiedAt: new Date(),
-            vendorNotificationCount: 1
-          }
-        })
-        await prisma.lead.update({
-          where: { id: conv.leadId },
-          data: { estado: 'NOTIFICADO' }
-        }).catch(() => {})
-
-        console.log(`[Motor] NOTIFIED: ${conv.lead?.telefono}`)
-      }
-      return
-    }
-
-    // Hay próximo MSG → enviarlo inmediatamente
-    const vars = {
-      telefono: conv.lead?.telefono || '',
-      nombre:   conv.lead?.nombreDetectado || '',
-      vendedor: vendor?.nombre || '',
-      curso:    campaign?.nombre || ''
-    }
-
-    const msgLead = interp(proximoMSG.mensaje, vars)
-
-    // CRÍTICO: marcar lastBotMessageAt ANTES de enviar
-    // Esto evita que el cron dispare el mismo paso mientras enviamos
-    await prisma.conversation.update({
-      where: { id: conv.id },
-      data: { currentStep: proximoMSG.orden, lastBotMessageAt: new Date() }
-    })
-
-    await sleep(800) // pequeña pausa natural antes de responder
-    await enviarTexto(instancia, conv.lead?.telefono, msgLead)
-    await guardarMsg(prisma, conv.leadId, conv.id, 'BOT', msgLead)
-    await prisma.lead.update({
-      where: { id: conv.leadId },
-      data: { pasoActual: proximoMSG.orden, ultimoMensaje: new Date() }
-    }).catch(() => {})
-
-    // Enviar NOTIFYs que venían antes del MSG
-    for (const n of notifys) {
-      if (vendor?.whatsappNumber) {
-        await enviarTexto(instancia, vendor.whatsappNumber, interp(n.mensaje, vars)).catch(() => {})
-      }
-    }
-
-    console.log(`[Motor] Paso ${proximoMSG.orden} inmediato: ${conv.lead?.telefono}`)
-  } catch (err) {
-    console.error('[Motor] avanzarSiguientePaso:', err.message)
-  }
-}
-
 async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor, texto }) {
   if (conv?.id) {
     await prisma.conversation.update({
@@ -163,7 +69,8 @@ async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor
   }
   const alertar = async (motivo) => {
     if (vendor?.whatsappNumber)
-      await enviarTexto(instancia, vendor.whatsappNumber, `${motivo}\n📱 wa.me/${lead.telefono}`).catch(() => {})
+      await enviarTexto(instancia, vendor.whatsappNumber,
+        `${motivo}\n📱 wa.me/${lead.telefono}`).catch(() => {})
   }
 
   if (contiene(texto, KW_NO_INTERES)) {
@@ -191,23 +98,17 @@ async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor
     await alertar('🔄 Lead reconfirmó interés')
     return
   }
-  // Default — cualquier otra respuesta del lead
   await enviar(`Con gusto 😊\n\n¿Tienes alguna pregunta sobre el programa o el precio? Un asesor de nuestro equipo te contactará pronto para orientarte.`)
 }
 
-// ════════════════════════════════════════════════════════════
-// MOTOR PRINCIPAL
-// ════════════════════════════════════════════════════════════
 export async function procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor }) {
   try {
     const lead = await prisma.lead.findUnique({ where: { telefono: numero } })
 
-    // ── LEAD EXISTENTE ────────────────────────────────────────
     if (lead) {
       const conv = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
-        orderBy: { createdAt: 'desc' },
-        include: { lead: true }
+        orderBy: { createdAt: 'desc' }
       })
 
       await guardarMsg(prisma, lead.id, conv?.id || null, 'LEAD', texto || '[imagen]')
@@ -244,25 +145,8 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         return
       }
 
-      // ACTIVE → avanzar siguiente paso INMEDIATAMENTE
-      // No esperar al cron — respuesta en tiempo real
-      if (conv?.id) {
-        const campaign = lead.campaignId
-          ? await prisma.campaign.findUnique({
-              where: { id: lead.campaignId },
-              include: { steps: { orderBy: { orden: 'asc' } } }
-            })
-          : null
-
-        await avanzarSiguientePaso(
-          prisma,
-          { ...conv, lead },
-          campaign,
-          vendor,
-          instancia
-        )
-      }
-
+      // ACTIVE → solo actualizar timestamp
+      // El followupEngine avanza los pasos con 20s de silencio
       await prisma.lead.update({
         where: { id: lead.id },
         data: { ultimoMensaje: new Date() }
@@ -300,7 +184,6 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
 
     await guardarMsg(prisma, newLead.id, conv?.id || null, 'LEAD', texto)
 
-    // Enviar bienvenida (paso 1)
     const pasos = campaign?.steps?.filter(s => s.tipo === 'MSG') || []
     const paso1 = pasos[0]
 
