@@ -1,12 +1,6 @@
-// src/webhook/stateEngine.js
-// HIDATA — Motor Sprint 5.0 — CON CONVERSATIONS OBJECT
-//
-// FIX DEFINITIVO del bug de mensajes repetidos:
-// - Antes: el motor miraba lead.estado (puede ser stale)
-// - Ahora: el motor busca conversation.state (fuente de verdad)
-// - Si ya existe una conversation NOTIFIED/CLOSED → silencio total
-// - Si ya existe ACTIVE → acumula mensajes, no manda nada
-// - Solo si no existe conversation → lead nuevo → crea conversation + envía bienvenida
+// src/webhook/stateEngine.js — Sprint 4
+// Fix: usa prisma.conversation (modelo real) en vez de $queryRawUnsafe
+// Fix: sincroniza conversation.state + lead.estado siempre juntos
 
 import { detectarCursoCampana } from './classifier.js'
 import { enviarTexto } from '../whatsapp/sender.js'
@@ -34,7 +28,7 @@ async function guardarMensaje(prisma, { leadId, conversationId, direccion, texto
     await prisma.message.create({
       data: {
         leadId,
-        conversation_id: conversationId || null,
+        conversationId: conversationId || null,
         origen: direccion === 'ENTRANTE' ? 'LEAD' : 'BOT',
         texto
       }
@@ -58,33 +52,30 @@ async function getCampaign(prisma, slug) {
   })
 }
 
-async function renotificarVendedor({ instancia, lead, vendor, motivo }) {
-  try {
-    if (!vendor?.whatsappNumber) return
-    const msg = `⚠️ ${motivo}\n\n📱 wa.me/${lead.telefono}\nAcción requerida — llama ahora`
-    await enviarTexto(instancia, vendor.whatsappNumber, msg)
-  } catch (err) {
-    console.error('[Motor] renotificarVendedor:', err.message)
-  }
+async function cerrarConversacion(prisma, conv, lead) {
+  await Promise.all([
+    prisma.conversation.update({
+      where: { id: conv.id },
+      data: { state: 'CLOSED', updatedAt: new Date() }
+    }),
+    prisma.lead.update({
+      where: { id: lead.id },
+      data: { estado: 'CERRADO' }
+    })
+  ])
 }
 
-// Manejar mensajes cuando conversation está NOTIFIED
 async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor, texto }) {
-  // Actualizar timestamp del último mensaje del lead en la conversation
-  await prisma.$executeRawUnsafe(
-    `UPDATE conversations SET last_lead_message_at = NOW(), updated_at = NOW() WHERE id = $1`,
-    conv.id
-  ).catch(() => {})
+  await prisma.conversation.update({
+    where: { id: conv.id },
+    data: { lastLeadMessageAt: new Date(), updatedAt: new Date() }
+  })
 
   if (contiene(texto, KW_NO_INTERES)) {
     const msg = `Entendido, no hay problema 😊\n\nSi en algún momento cambias de opinión, aquí estaremos.\n\n¡Mucho éxito!`
     await enviarTexto(instancia, numero, msg)
     await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    // Cerrar AMBOS: lead y conversation
-    await prisma.lead.update({ where: { id: lead.id }, data: { estado: 'CERRADO' } })
-    await prisma.$executeRawUnsafe(
-      `UPDATE conversations SET state = 'CLOSED', updated_at = NOW() WHERE id = $1`, conv.id
-    ).catch(() => {})
+    await cerrarConversacion(prisma, conv, lead)
     return
   }
 
@@ -92,7 +83,9 @@ async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor
     const msg = `Mil disculpas, eso no debería pasar 🙏\n\nYa envié una alerta urgente a tu asesor — te llama en los próximos minutos.\n\n¡Gracias por tu paciencia!`
     await enviarTexto(instancia, numero, msg)
     await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    await renotificarVendedor({ instancia, lead, vendor, motivo: `URGENTE — Lead reclama que nadie lo llamó` })
+    if (vendor?.whatsappNumber) {
+      await enviarTexto(instancia, vendor.whatsappNumber, `⚠️ URGENTE — Lead reclama que nadie lo llamó\n\n📱 wa.me/${lead.telefono}\n¡Llama ahora!`)
+    }
     return
   }
 
@@ -100,12 +93,14 @@ async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor
     const msg = `Perfecto! 📅\n\nLe aviso a tu asesor que te llame en ese horario.\n\n¡Estate pendiente al teléfono!`
     await enviarTexto(instancia, numero, msg)
     await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    await renotificarVendedor({ instancia, lead, vendor, motivo: `Lead pidió hora: "${texto.slice(0, 80)}"` })
+    if (vendor?.whatsappNumber) {
+      await enviarTexto(instancia, vendor.whatsappNumber, `📌 Lead pidió hora específica\n📱 wa.me/${lead.telefono}\nDijo: "${texto.slice(0, 80)}"`)
+    }
     return
   }
 
   if (contiene(texto, KW_PRECIO)) {
-    const msg = `La inversión en el programa es de S/ 1,500 💰\n\nTambién tenemos facilidades de pago en cuotas.\n\nTu asesor te explicará todos los detalles cuando te llame — ¡que es hoy! 😊`
+    const msg = `¡Claro! 💰\n\nTenemos facilidades de pago en cuotas.\n\nTu asesor te explicará todos los detalles cuando te llame — ¡que es hoy! 😊`
     await enviarTexto(instancia, numero, msg)
     await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
     return
@@ -115,7 +110,9 @@ async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor
     const msg = `¡Genial! 🎉\n\nYa avisé a tu asesor — te llama muy pronto.\n\n¡Estate atento al teléfono!`
     await enviarTexto(instancia, numero, msg)
     await guardarMensaje(prisma, { leadId: lead.id, conversationId: conv.id, direccion: 'SALIENTE', texto: msg })
-    await renotificarVendedor({ instancia, lead, vendor, motivo: `Lead reconfirmó interés` })
+    if (vendor?.whatsappNumber) {
+      await enviarTexto(instancia, vendor.whatsappNumber, `🔄 Lead reconfirmó interés\n📱 wa.me/${lead.telefono}`)
+    }
     return
   }
 
@@ -126,24 +123,19 @@ async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor
 }
 
 // ════════════════════════════════════════════════════════════
-// MOTOR PRINCIPAL — con conversations como fuente de verdad
+// MOTOR PRINCIPAL
 // ════════════════════════════════════════════════════════════
 export async function procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor }) {
   try {
-    // 1. Buscar lead
     const lead = await prisma.lead.findUnique({ where: { telefono: numero } })
 
     // ── LEAD EXISTENTE ───────────────────────────────────────
     if (lead) {
-      // 2. Buscar conversation activa de este lead
-      // Usamos raw query porque conversations es tabla nueva sin modelo Prisma aún
-      const convRows = await prisma.$queryRawUnsafe(
-        `SELECT * FROM conversations WHERE lead_id = $1 ORDER BY updated_at DESC LIMIT 1`,
-        lead.id
-      )
-      const conv = convRows?.[0] || null
+      const conv = await prisma.conversation.findFirst({
+        where: { leadId: lead.id },
+        orderBy: { updatedAt: 'desc' }
+      })
 
-      // Guardar mensaje entrante siempre
       await guardarMensaje(prisma, {
         leadId: lead.id,
         conversationId: conv?.id || null,
@@ -151,15 +143,14 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         texto: texto || '[imagen]'
       })
 
-      // Actualizar timestamp en conversation
       if (conv) {
-        await prisma.$executeRawUnsafe(
-          `UPDATE conversations SET last_lead_message_at = NOW(), updated_at = NOW() WHERE id = $1`,
-          conv.id
-        ).catch(() => {})
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: { lastLeadMessageAt: new Date(), updatedAt: new Date() }
+        })
       }
 
-      // Imagen → posible pago (independiente del estado)
+      // Imagen → comprobante de pago
       if (tieneImagen) {
         const msg = `✅ Recibimos tu imagen.\n\nUn asesor validará tu pago y te dará los accesos en breve.`
         await sleep(800)
@@ -168,31 +159,24 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
         return
       }
 
-      // ── DECISIÓN POR ESTADO DE CONVERSATION (no de lead) ──
-      const convState = conv?.state || lead.estado
+      const convState = conv?.state || 'ACTIVE'
 
-      // CERRADO → silencio total
       if (convState === 'CLOSED' || lead.estado === 'CERRADO') return
 
-      // NOTIFIED → casuísticas (responder preguntas del lead)
       if (convState === 'NOTIFIED' || lead.estado === 'NOTIFICADO') {
-        const campaignForVendor = lead.campaignId
-          ? await prisma.campaign.findUnique({
-              where: { id: lead.campaignId },
-              include: { vendor: true }
-            })
+        const campaignData = lead.campaignId
+          ? await prisma.campaign.findUnique({ where: { id: lead.campaignId }, include: { vendor: true } })
           : null
         await manejarNotificado({
           prisma, instancia, numero, lead,
-          conv,
-          vendor: campaignForVendor?.vendor || vendor,
+          conv: conv || { id: null },
+          vendor: campaignData?.vendor || vendor,
           texto
         })
         return
       }
 
-      // ACTIVE (EN_FLUJO) → acumular, el followupEngine avanza pasos
-      // Solo actualizamos el lead timestamp — no mandamos nada
+      // ACTIVE → acumular, el followupEngine avanza
       await prisma.lead.update({
         where: { id: lead.id },
         data: { ultimoMensaje: new Date() }
@@ -215,66 +199,66 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
       }
     })
 
-    // Crear conversation object inmediatamente
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO conversations (lead_id, campaign_id, vendor_id, state, current_step, last_lead_message_at)
-      VALUES ($1, $2, $3, 'ACTIVE', 0, NOW())
-      ON CONFLICT (lead_id, campaign_id) DO NOTHING
-    `, newLead.id, campaign?.id || null, vendor.id).catch(err => {
-      console.error('[Motor] Error creando conversation:', err.message)
+    // Crear conversation con modelo Prisma real
+    const conv = await prisma.conversation.create({
+      data: {
+        leadId: newLead.id,
+        campaignId: campaign?.id || null,
+        vendorId: vendor.id,
+        state: 'ACTIVE',
+        currentStep: 0,
+        lastLeadMessageAt: new Date()
+      }
+    }).catch(async (err) => {
+      // Si ya existe (race condition), buscarla
+      console.error('[Motor] conversation ya existe:', err.message)
+      return await prisma.conversation.findFirst({ where: { leadId: newLead.id } })
     })
-
-    // Obtener conversation recién creada
-    const convRows2 = await prisma.$queryRawUnsafe(
-      `SELECT id FROM conversations WHERE lead_id = $1 LIMIT 1`, newLead.id
-    )
-    const convId = convRows2?.[0]?.id || null
 
     await guardarMensaje(prisma, {
       leadId: newLead.id,
-      conversationId: convId,
+      conversationId: conv?.id || null,
       direccion: 'ENTRANTE',
       texto
     })
 
-    // Enviar bienvenida desde FlowBuilder
+    // Bienvenida desde FlowBuilder
     const pasosMSG = campaign?.steps?.filter(s => s.tipo === 'MSG') || []
     const pasoBienvenida = pasosMSG[0]
 
-    let msgBienvenida
-    if (pasoBienvenida?.mensaje) {
-      msgBienvenida = (pasoBienvenida.mensaje || '')
-        .replace(/\{\{telefono\}\}/g, numero)
-        .replace(/\{\{vendedor\}\}/g, vendor?.nombre || '')
-        .replace(/\{\{curso\}\}/g, campaign?.nombre || '')
-    } else {
-      msgBienvenida =
-        `Hola 👋 te saluda *Perú Exporta TV* 🇵🇪\n\n` +
-        `Cuéntame: ¿cómo te llamas y qué producto tienes en mente para exportar? 👇`
-    }
+    const msgBienvenida = pasoBienvenida?.mensaje
+      ? pasoBienvenida.mensaje
+          .replace(/\{\{telefono\}\}/g, numero)
+          .replace(/\{\{vendedor\}\}/g, vendor?.nombre || '')
+          .replace(/\{\{curso\}\}/g, campaign?.nombre || '')
+      : `Hola 👋 te saluda *Perú Exporta TV* 🇵🇪\n\nCuéntame: ¿cómo te llamas y qué producto tienes en mente para exportar? 👇`
 
     await sleep(1000)
     await enviarTexto(instancia, numero, msgBienvenida)
     await guardarMensaje(prisma, {
       leadId: newLead.id,
-      conversationId: convId,
+      conversationId: conv?.id || null,
       direccion: 'SALIENTE',
       texto: msgBienvenida
     })
 
-    // Actualizar conversation con bot message timestamp y paso
-    if (convId) {
-      await prisma.$executeRawUnsafe(`
-        UPDATE conversations 
-        SET current_step = $1, last_bot_message_at = NOW(), updated_at = NOW()
-        WHERE id = $2
-      `, pasoBienvenida?.orden || 1, convId).catch(() => {})
+    if (conv?.id) {
+      await prisma.conversation.update({
+        where: { id: conv.id },
+        data: {
+          currentStep: pasoBienvenida?.orden || 1,
+          lastBotMessageAt: new Date(),
+          updatedAt: new Date()
+        }
+      })
     }
 
     await prisma.lead.update({
       where: { id: newLead.id },
-      data: { pasoActual: pasoBienvenida?.orden || 1, ultimoMensaje: new Date() }
+      data: { pasoActual: pasoBienvenida?.orden || 1 }
     })
+
+    console.log(`[Motor] Lead nuevo: ${numero} | campaña: ${campaign?.slug || 'orgánico'}`)
 
   } catch (err) {
     console.error('[Motor] Error:', err.message, err.stack)
