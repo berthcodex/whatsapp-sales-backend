@@ -89,12 +89,13 @@ model Lead {
 
 // ─── Historial de mensajes ────────────────────────────────────
 model Message {
-  id        Int      @id @default(autoincrement())
-  leadId    Int
-  lead      Lead     @relation(fields: [leadId], references: [id])
-  origen    String   // LEAD | BOT | VENDEDOR
-  texto     String   @db.Text
-  createdAt DateTime @default(now())
+  id              Int      @id @default(autoincrement())
+  leadId          Int
+  lead            Lead     @relation(fields: [leadId], references: [id])
+  conversation_id Int?     // FK a tabla conversations (creada vía SQL migration)
+  origen          String   // LEAD | BOT | VENDEDOR
+  texto           String   @db.Text
+  createdAt       DateTime @default(now())
 
   @@map("messages")
 }
