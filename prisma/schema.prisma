@@ -110,7 +110,7 @@ model Conversation {
   reminderJobId           String?
   messages                Message[]
   createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
+  updatedAt               DateTime  @default(now())
 
   @@unique([leadId, campaignId])
   @@map("conversations")
