@@ -1,11 +1,13 @@
-// src/webhook/handler.js
-// HIDATA — Webhook Handler Sprint 3
-// Fix B1: modelo "vendor" (no "vendedor"), instanciaEvolution ahora en DB real
+// src/webhook/handler.js — Sprint 5
+// Fix velocidad: debounce 1.5s (era 3s)
+// Fix acumulación: los mensajes del lead se concatenan en el debounce
+// Fix: usa llama-3.1-8b-instant para respuestas más rápidas
 
 import { procesarConMotor } from './stateEngine.js'
 
 const mensajesProcesados = new Set()
 const debounceMap = new Map()
+const acumuladorMap = new Map() // acumula textos del mismo número
 
 function yaFueProcesado(messageId) {
   if (!messageId) return false
@@ -15,17 +17,33 @@ function yaFueProcesado(messageId) {
   return false
 }
 
-function debeEsperar(numero, callback) {
+// Acumula mensajes del mismo número en ventana de 1.5s
+// Si el lead escribe 3 mensajes seguidos → se procesan como uno solo
+function acumularYEsperar(numero, texto, tieneImagen, callback) {
+  // Acumular texto
+  if (texto) {
+    const prev = acumuladorMap.get(numero) || ''
+    acumuladorMap.set(numero, prev ? prev + ' ' + texto : texto)
+  }
+  if (tieneImagen) {
+    acumuladorMap.set(numero + '_img', true)
+  }
+
+  // Resetear timer
   if (debounceMap.has(numero)) clearTimeout(debounceMap.get(numero))
+
   const timer = setTimeout(() => {
     debounceMap.delete(numero)
-    callback()
-  }, 3000)
+    const textoAcumulado = acumuladorMap.get(numero) || ''
+    const imagenAcumulada = acumuladorMap.get(numero + '_img') || false
+    acumuladorMap.delete(numero)
+    acumuladorMap.delete(numero + '_img')
+    callback(textoAcumulado, imagenAcumulada)
+  }, 1500) // 1.5s — era 3s
+
   debounceMap.set(numero, timer)
 }
 
-// Sprint 3 Fix: "prisma.vendor" es el modelo correcto (no "vendedor")
-// instanciaEvolution ahora existe en DB (migration_sprint3.sql)
 async function getVendorPorInstancia(prisma, instancia) {
   return await prisma.vendor.findFirst({
     where: { instanciaEvolution: instancia, activo: true }
@@ -71,12 +89,12 @@ export async function handleWebhook(request, reply, prisma) {
     const vendor = await getVendorPorInstancia(prisma, instancia)
     if (!vendor) {
       console.error(`[Handler] Instancia no reconocida: "${instancia}"`)
-      console.error('[Handler] Verifica vendors.instanciaEvolution en DB con migration_sprint3.sql')
       return
     }
 
-    debeEsperar(numero, () => {
-      procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor })
+    // Acumular y procesar con debounce 1.5s
+    acumularYEsperar(numero, texto, tieneImagen, (textoFinal, imagenFinal) => {
+      procesarConMotor({ prisma, instancia, numero, texto: textoFinal, tieneImagen: imagenFinal, vendor })
         .catch(err => console.error('[Handler] Error en motor:', err.message))
     })
 
