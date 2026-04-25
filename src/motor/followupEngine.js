@@ -166,7 +166,6 @@ export async function ejecutarFollowup(prisma) {
         await guardarMsg(prisma, conv.leadId, conv.id, msgLead)
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { currentStep: proximoMSG.orden, lastBotMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
         })
         await prisma.lead.update({
           where: { id: conv.leadId },
@@ -217,7 +216,6 @@ export async function ejecutarFollowup(prisma) {
           state: 'NOTIFIED',
           vendorNotifiedAt: new Date().toISOString(),
           vendorNotificationCount: conv.vendorNotificationCount + 1,
-          updatedAt: new Date().toISOString()
         }
       })
       await prisma.lead.update({
@@ -279,7 +277,6 @@ export async function ejecutarFollowup(prisma) {
       await guardarMsg(prisma, conv.leadId, conv.id, msgFollowup)
       await prisma.conversation.update({
         where: { id: conv.id },
-        data: { currentStep: followup.orden, lastBotMessageAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
       })
       await prisma.lead.update({
         where: { id: conv.leadId },
@@ -321,7 +318,6 @@ export async function ejecutarFollowup(prisma) {
       const reactCount = conv.reactivationCount
 
       if (minutos >= 2880) {
-        await prisma.conversation.update({ where: { id: conv.id }, data: { state: 'CLOSED', updatedAt: new Date().toISOString() } })
         await prisma.lead.update({ where: { id: conv.leadId }, data: { estado: 'CERRADO' } }).catch(() => {})
         console.log(`[Followup] CLOSED (48h): ${conv.lead.telefono}`)
         continue
@@ -345,7 +341,6 @@ export async function ejecutarFollowup(prisma) {
         }
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { reactivationCount: reactCount + 1, lastReactivationAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
         })
         procesados++
         continue
@@ -365,7 +360,6 @@ export async function ejecutarFollowup(prisma) {
           reactivationCount: reactCount + 1,
           lastReactivationAt: new Date().toISOString(),
           lastBotMessageAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
         }
       })
 
