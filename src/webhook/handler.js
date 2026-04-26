@@ -1,7 +1,6 @@
 // src/webhook/handler.js — v3 HIDATA 200X
 // Multi-vendor ready: debounce por instancia:telefono
 // presence.update adaptativo — respeta ritmo del usuario 40+
-
 import { processIncoming } from './stateEngine.js'
 
 const DEBOUNCE_MS = 5000
@@ -11,7 +10,6 @@ async function handleWebhook(req, reply) {
   try {
     const body = req.body
     const event = body?.event
-
     const instancia = body?.instance || ''
 
     if (event === 'presence.update') {
@@ -30,7 +28,8 @@ async function handleWebhook(req, reply) {
 
     if (event !== 'messages.upsert') return reply.send({ ok: true })
 
-    const msg = body?.data?.messages?.[0]
+    const msg = body?.data?.messages?.[0] || body?.data
+
     if (!msg) return reply.send({ ok: true })
 
     const fromMe = msg?.key?.fromMe
@@ -72,9 +71,7 @@ async function dispararBrain(key, instancia, telefono) {
   const mensajeCompleto = debounceMap.get(key)?.buffer
   debounceMap.delete(key)
   if (!mensajeCompleto) return
-
   console.log(`[Handler] ${instancia} → ${telefono}: "${mensajeCompleto.slice(0, 80)}"`)
-
   await processIncoming({
     telefono,
     mensaje:  mensajeCompleto,
