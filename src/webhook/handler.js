@@ -1,51 +1,95 @@
-// src/webhook/handler.js — v3 HIDATA 200X
+// src/webhook/handler.js — v4 HIDATA 111X
 // Multi-vendor ready: debounce por instancia:telefono
-// presence.update adaptativo — respeta ritmo del usuario 40+
+// presence.update adaptativo — composing/paused
+// Guard: ignora grupos @g.us y broadcasts
+// Guard: idempotencia por message ID — anti-duplicados Evolution API
+
 import { processIncoming } from './stateEngine.js'
 
-const DEBOUNCE_MS = 5000
-const debounceMap = new Map()
+const DEBOUNCE_COMPOSING_MS = 5000
+const DEBOUNCE_PAUSED_MS    = 1500
+
+const debounceMap  = new Map()
+const procesadosId = new Set() // idempotencia — últimos 500 message IDs
+const MAX_IDS      = 500
 
 async function handleWebhook(req, reply) {
   try {
-    const body = req.body
-    const event = body?.event
+    const body      = req.body
+    const event     = body?.event
     const instancia = body?.instance || ''
 
+    // ── PRESENCE.UPDATE ──────────────────────────────────────
     if (event === 'presence.update') {
-      const telefono = body?.data?.id?.replace('@s.whatsapp.net', '')
-      const presence = body?.data?.presences?.[telefono]?.lastKnownPresence
+      const rawId    = body?.data?.id || ''
+      const telefono = rawId.replace('@s.whatsapp.net', '')
+      const presences = body?.data?.presences || {}
+      const presence  = presences[rawId]?.lastKnownPresence
+                     || presences[telefono]?.lastKnownPresence
+
       const key = `${instancia}:${telefono}`
-      if (telefono && presence === 'composing' && debounceMap.has(key)) {
-        clearTimeout(debounceMap.get(key).timer)
-        debounceMap.get(key).timer = setTimeout(
-          () => dispararBrain(key, instancia, telefono),
-          DEBOUNCE_MS
-        )
+
+      if (telefono && debounceMap.has(key)) {
+        if (presence === 'composing') {
+          clearTimeout(debounceMap.get(key).timer)
+          debounceMap.get(key).timer = setTimeout(
+            () => dispararBrain(key, instancia, telefono),
+            DEBOUNCE_COMPOSING_MS
+          )
+          console.log(`[Handler] composing → reset 5s: ${telefono}`)
+        } else if (presence === 'paused') {
+          clearTimeout(debounceMap.get(key).timer)
+          debounceMap.get(key).timer = setTimeout(
+            () => dispararBrain(key, instancia, telefono),
+            DEBOUNCE_PAUSED_MS
+          )
+          console.log(`[Handler] paused → reduce 1.5s: ${telefono}`)
+        }
       }
       return reply.send({ ok: true })
     }
 
+    // ── MESSAGES.UPSERT ──────────────────────────────────────
     if (event !== 'messages.upsert') return reply.send({ ok: true })
 
     const msg = body?.data?.messages?.[0] || body?.data
-
     if (!msg) return reply.send({ ok: true })
 
-    const fromMe = msg?.key?.fromMe
-    if (fromMe) return reply.send({ ok: true })
+    // ── GUARD: fromMe ────────────────────────────────────────
+    if (msg?.key?.fromMe) return reply.send({ ok: true })
 
-    const telefono = msg?.key?.remoteJid?.replace('@s.whatsapp.net', '')
+    // ── GUARD: grupos y broadcasts ───────────────────────────
+    const remoteJid = msg?.key?.remoteJid || ''
+    if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@broadcast')) {
+      console.log(`[Handler] Grupo/broadcast ignorado: ${remoteJid}`)
+      return reply.send({ ok: true })
+    }
+
+    // ── GUARD: idempotencia por message ID ───────────────────
+    const msgId = msg?.key?.id
+    if (msgId) {
+      if (procesadosId.has(msgId)) {
+        console.log(`[Handler] Duplicado ignorado: ${msgId}`)
+        return reply.send({ ok: true })
+      }
+      procesadosId.add(msgId)
+      if (procesadosId.size > MAX_IDS) {
+        const first = procesadosId.values().next().value
+        procesadosId.delete(first)
+      }
+    }
+
+    const telefono = remoteJid.replace('@s.whatsapp.net', '')
     if (!telefono) return reply.send({ ok: true })
 
     const esImagen = !!(msg?.message?.imageMessage)
-    const texto = msg?.message?.conversation ||
-                  msg?.message?.extendedTextMessage?.text || ''
+    const texto    = msg?.message?.conversation ||
+                     msg?.message?.extendedTextMessage?.text || ''
 
     if (!texto && !esImagen) return reply.send({ ok: true })
 
     const contenido = esImagen ? '__IMAGE__' : texto
-    const key = `${instancia}:${telefono}`
+    const key       = `${instancia}:${telefono}`
 
     if (debounceMap.has(key)) {
       clearTimeout(debounceMap.get(key).timer)
@@ -56,26 +100,28 @@ async function handleWebhook(req, reply) {
 
     debounceMap.get(key).timer = setTimeout(
       () => dispararBrain(key, instancia, telefono),
-      DEBOUNCE_MS
+      DEBOUNCE_COMPOSING_MS
     )
+
+    console.log(`[Handler] buffer acumulado (${debounceMap.get(key).buffer.split('\n').length} msgs): ${telefono}`)
 
     return reply.send({ ok: true })
 
   } catch (err) {
-    req.log.error(err)
+    console.error('[Handler] Error:', err.message)
     return reply.code(500).send({ error: 'Internal error' })
   }
 }
 
 async function dispararBrain(key, instancia, telefono) {
-  const mensajeCompleto = debounceMap.get(key)?.buffer
+  const entry = debounceMap.get(key)
   debounceMap.delete(key)
-  if (!mensajeCompleto) return
-  console.log(`[Handler] ${instancia} → ${telefono}: "${mensajeCompleto.slice(0, 80)}"`)
+  if (!entry?.buffer) return
+  console.log(`[Handler] DISPARO → ${instancia}:${telefono}: "${entry.buffer.slice(0, 80)}"`)
   await processIncoming({
     telefono,
-    mensaje:  mensajeCompleto,
-    esImagen: mensajeCompleto.includes('__IMAGE__'),
+    mensaje:  entry.buffer,
+    esImagen: entry.buffer.includes('__IMAGE__'),
     instancia
   })
 }
