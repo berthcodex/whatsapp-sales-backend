@@ -1,8 +1,9 @@
-// src/webhook/stateEngine.js — v3 HIDATA 111X
+// src/webhook/stateEngine.js — v4 HIDATA 111X
 // Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
 // Multi-vendor ready + Guard de propiedad de leads
 // Router inteligente 2 capas — Groq como autoridad única
-// Guard anti-ruido post-bienvenida — 15s ventana
+// Guard anti-ruido 8s — sin conteo de mensajes
+// Fix: sanitización de botPrompt "" → "
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
@@ -31,15 +32,17 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v2 — autoridad única, devuelve JSON estructurado
+// GROQ BRAIN v3 — autoridad única, devuelve JSON estructurado
 // Cerebro decide. Código ejecuta. Nunca al revés.
+// Fix: botPrompt sanitizado — "" → " antes de enviar a Groq
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({ historial, textoActual, esImagen, convState, perfilActual, botPrompt, campaignNombre }) {
   try {
     if (!process.env.GROQ_API_KEY) return null
 
-    const promptBase = botPrompt ||
-`Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta'}.
+    const promptBase = botPrompt
+      ? botPrompt.replace(/""/g, '"')
+      : `Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta'}.
 Tu misión es calificar al lead, no venderle. El cierre es por teléfono.
 Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
 Nunca reveles que eres IA. Si preguntan: "Soy Jhon, asesor de Peru Exporta 😊"
@@ -119,7 +122,7 @@ RESPONDE ÚNICAMENTE EN JSON VÁLIDO — SIN TEXTO ADICIONAL, SIN MARKDOWN, SIN 
     try {
       return JSON.parse(limpio)
     } catch {
-      console.error('[Brain IA] JSON parse falló, usando respuesta libre')
+      console.error('[Brain IA] JSON parse falló, contenido raw:', contenido?.slice(0, 200))
       return {
         intencion: 'FLUJO_NORMAL',
         respuesta: contenido,
@@ -265,10 +268,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       }
 
       // ── GUARD ANTI-RUIDO POST-BIENVENIDA ──────────────────
-      // Caso real: lead hace click en Ad → mensaje predeterminado
-      // + inmediatamente escribe algo más o error de tipeo
-      // Si el bot acaba de saludar (< 15s) y el lead no ha
-      // respondido nada real aún → ignorar ruido
+      // 8s desde último mensaje del bot — sin conteo de mensajes
+      // Cubre ruido del Ad sin bloquear respuestas reales del lead
       const convGuard = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
         orderBy: { createdAt: 'desc' }
@@ -276,12 +277,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
       if (convGuard?.lastBotMessageAt) {
         const msDesdeUltimoBot = new Date() - new Date(convGuard.lastBotMessageAt)
-        const totalMensajesLead = await prisma.message.count({
-          where: { leadId: lead.id, origen: 'LEAD' }
-        })
-
-        if (msDesdeUltimoBot < 15000 && totalMensajesLead <= 1) {
-          console.log(`[Guard] Anti-ruido: bot habló hace ${Math.round(msDesdeUltimoBot/1000)}s, lead no ha respondido aún — ignorado: ${telefono}`)
+        if (msDesdeUltimoBot < 8000) {
+          console.log(`[Guard] Anti-ruido: bot habló hace ${Math.round(msDesdeUltimoBot/1000)}s — ignorado: ${telefono}`)
           return
         }
       }
