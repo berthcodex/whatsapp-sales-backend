@@ -5,13 +5,47 @@
 // Fix: sanitización de botPrompt "" → "
 // Fix: parser robusto — extrae JSON aunque Groq escriba texto antes
 // Fix: prompt reforzado — instrucción crítica de formato
+// Fix: Redis lock — anti doble respuesta multi-ventana
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
 import { resolverCampaign } from './routerInteligente.js'
 import { enviarTexto } from '../whatsapp/sender.js'
+import { Redis } from '@upstash/redis'
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+const redis = new Redis({
+  url:   process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+})
+
+// ════════════════════════════════════════════════════════════
+// REDIS LOCK — anti doble respuesta
+// Mientras Groq procesa un lead, bloquea nuevos disparos
+// Lock expira en 15s por seguridad — nunca queda pegado
+// ════════════════════════════════════════════════════════════
+async function adquirirLock(telefono) {
+  try {
+    const result = await redis.set(
+      `lock:${telefono}`,
+      '1',
+      { nx: true, ex: 15 }
+    )
+    return result === 'OK'
+  } catch(e) {
+    console.error('[Lock] Redis error adquirir:', e.message)
+    return true // si Redis falla, dejamos pasar — mejor doble respuesta que silencio
+  }
+}
+
+async function liberarLock(telefono) {
+  try {
+    await redis.del(`lock:${telefono}`)
+  } catch(e) {
+    console.error('[Lock] Redis error liberar:', e.message)
+  }
+}
 
 // ════════════════════════════════════════════════════════════
 // HELPERS
@@ -43,10 +77,10 @@ async function consultarGroq({ historial, textoActual, esImagen, convState, perf
 
     const promptBase = botPrompt
       ? botPrompt.replace(/""/g, '"')
-      : `Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta'}.
+      : `Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta TV'}.
 Tu misión es calificar al lead, no venderle. El cierre es por teléfono.
 Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
-Nunca reveles que eres IA. Si preguntan: "Soy Jhon, asesor de Peru Exporta 😊"
+Nunca reveles que eres IA. Si preguntan: "Soy Jhon, asesor de Peru Exporta TV 😊"
 Precio: S/457 hasta el 30 de abril, luego S/757.`
 
     const systemPrompt =
@@ -148,7 +182,6 @@ El primer carácter de tu respuesta debe ser { y el último }.
 
 // ════════════════════════════════════════════════════════════
 // PROFILE BUILDER — acumula perfil del lead en Supabase
-// Solo escribe campos que Groq extrajo — nunca sobreescribe con null
 // ════════════════════════════════════════════════════════════
 async function actualizarPerfil(leadId, datosExtraidos) {
   try {
@@ -163,7 +196,7 @@ async function actualizarPerfil(leadId, datosExtraidos) {
 }
 
 // ════════════════════════════════════════════════════════════
-// ACTION EXECUTOR — código puro ejecuta lo que Groq decidió
+// ACTION EXECUTOR
 // ════════════════════════════════════════════════════════════
 async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) {
   try {
@@ -230,12 +263,11 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) 
 }
 
 // ════════════════════════════════════════════════════════════
-// ENTRY POINT — llamado desde handler.js
+// ENTRY POINT
 // ════════════════════════════════════════════════════════════
 export async function processIncoming({ telefono, mensaje, esImagen, instancia }) {
   try {
 
-    // ── Vendor por instancia ─────────────────────────────────
     const vendor = await prisma.vendor.findFirst({
       where: { instanciaEvolution: instancia, activo: true }
     })
@@ -245,7 +277,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       return
     }
 
-    // ── Lead existente ───────────────────────────────────────
     const lead = await prisma.lead.findUnique({ where: { telefono } })
 
     // ════════════════════════════════════════════════════════
@@ -253,7 +284,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     // ════════════════════════════════════════════════════════
     if (lead) {
 
-      // ── GUARD DE PROPIEDAD — multi-vendor ─────────────────
+      // ── GUARD DE PROPIEDAD ────────────────────────────────
       let vendorActivo    = vendor
       let instanciaActiva = instancia
 
@@ -275,84 +306,97 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         }
       }
 
-      const conv = await prisma.conversation.findFirst({
-        where: { leadId: lead.id },
-        orderBy: { createdAt: 'desc' }
-      })
-
-      await guardarMsg(lead.id, conv?.id || null, 'LEAD', esImagen ? '[imagen]' : mensaje)
-
-      if (conv?.id) {
-        await prisma.conversation.update({
-          where: { id: conv.id },
-          data: { lastLeadMessageAt: new Date() }
-        }).catch(() => {})
-      }
-
-      const convState = conv?.state || 'ACTIVE'
-
-      if (convState === 'CLOSED' || lead.estado === 'CERRADO') {
-        console.log(`[Motor] Lead cerrado ignorado: ${telefono}`)
+      // ── REDIS LOCK — anti doble respuesta ─────────────────
+      const lockAdquirido = await adquirirLock(telefono)
+      if (!lockAdquirido) {
+        console.log(`[Lock] Lead en proceso — ignorado: ${telefono}`)
         return
       }
 
-      const perfilActual = {
-        nombre:   lead.nombreDetectado   || null,
-        producto: lead.productoDetectado || null,
-        estado:   lead.estado            || null
-      }
+      try {
 
-      const historial = await prisma.message.findMany({
-        where: { leadId: lead.id },
-        orderBy: { createdAt: 'asc' },
-        take: 15
-      })
-
-      const cam = lead.campaignId
-        ? await prisma.campaign.findUnique({
-            where: { id: lead.campaignId }
-          })
-        : null
-
-      // ── GROQ — autoridad única ───────────────────────────
-      const resultado = await consultarGroq({
-        historial,
-        textoActual: mensaje,
-        esImagen,
-        convState,
-        perfilActual,
-        botPrompt:      cam?.botPrompt || null,
-        campaignNombre: cam?.nombre    || 'Peru Exporta TV'
-      })
-
-      const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
-
-      if (conv?.id) {
-        await prisma.conversation.update({
-          where: { id: conv.id },
-          data: { lastBotMessageAt: new Date() }
-        }).catch(() => {})
-      }
-
-      await sleep(800)
-      await enviarTexto(instanciaActiva, telefono, respuesta)
-      await guardarMsg(lead.id, conv?.id || null, 'BOT', respuesta)
-
-      if (resultado?.datosExtraidos) {
-        await actualizarPerfil(lead.id, resultado.datosExtraidos)
-      }
-
-      if (resultado?.accion && resultado.accion !== 'NINGUNA' && conv?.id) {
-        await ejecutarAccion({
-          accion:    resultado.accion,
-          lead, conv,
-          instancia: instanciaActiva,
-          vendor:    vendorActivo,
-          texto:     mensaje
+        const conv = await prisma.conversation.findFirst({
+          where: { leadId: lead.id },
+          orderBy: { createdAt: 'desc' }
         })
+
+        await guardarMsg(lead.id, conv?.id || null, 'LEAD', esImagen ? '[imagen]' : mensaje)
+
+        if (conv?.id) {
+          await prisma.conversation.update({
+            where: { id: conv.id },
+            data: { lastLeadMessageAt: new Date() }
+          }).catch(() => {})
+        }
+
+        const convState = conv?.state || 'ACTIVE'
+
+        if (convState === 'CLOSED' || lead.estado === 'CERRADO') {
+          console.log(`[Motor] Lead cerrado ignorado: ${telefono}`)
+          return
+        }
+
+        const perfilActual = {
+          nombre:   lead.nombreDetectado   || null,
+          producto: lead.productoDetectado || null,
+          estado:   lead.estado            || null
+        }
+
+        const historial = await prisma.message.findMany({
+          where: { leadId: lead.id },
+          orderBy: { createdAt: 'asc' },
+          take: 15
+        })
+
+        const cam = lead.campaignId
+          ? await prisma.campaign.findUnique({
+              where: { id: lead.campaignId }
+            })
+          : null
+
+        const resultado = await consultarGroq({
+          historial,
+          textoActual: mensaje,
+          esImagen,
+          convState,
+          perfilActual,
+          botPrompt:      cam?.botPrompt || null,
+          campaignNombre: cam?.nombre    || 'Peru Exporta TV'
+        })
+
+        const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
+
+        if (conv?.id) {
+          await prisma.conversation.update({
+            where: { id: conv.id },
+            data: { lastBotMessageAt: new Date() }
+          }).catch(() => {})
+        }
+
+        await sleep(800)
+        await enviarTexto(instanciaActiva, telefono, respuesta)
+        await guardarMsg(lead.id, conv?.id || null, 'BOT', respuesta)
+
+        if (resultado?.datosExtraidos) {
+          await actualizarPerfil(lead.id, resultado.datosExtraidos)
+        }
+
+        if (resultado?.accion && resultado.accion !== 'NINGUNA' && conv?.id) {
+          await ejecutarAccion({
+            accion:    resultado.accion,
+            lead, conv,
+            instancia: instanciaActiva,
+            vendor:    vendorActivo,
+            texto:     mensaje
+          })
+        }
+
+        console.log(`[Brain IA] ${convState} → ${resultado?.intencion || 'FLUJO_NORMAL'} | accion: ${resultado?.accion || 'NINGUNA'} | vendor: ${vendorActivo.nombre} | ${telefono}`)
+
+      } finally {
+        await liberarLock(telefono)
       }
 
-      console.log(`[Brain IA] ${convState} → ${resultado?.intencion || 'FLUJO_NORMAL'} | accion: ${resultado?.accion || 'NINGUNA'} | vendor: ${vendorActivo.nombre} | ${telefono}`)
       return
     }
 
