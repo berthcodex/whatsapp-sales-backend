@@ -74,6 +74,21 @@ export async function ejecutarFollowup(prisma) {
 
   for (const conv of convsActivas) {
     try {
+      // LOCK OPTIMISTA — marcar inmediatamente para que otros crons salteen
+      // Si 2 crons llegan al mismo tiempo, el segundo ve lastBotMessageAt reciente y skippea
+      const locked = await prisma.conversation.updateMany({
+        where: {
+          id: conv.id,
+          // Solo lockear si nadie más lo tomó en los últimos 10 segundos
+          OR: [
+            { lastBotMessageAt: null },
+            { lastBotMessageAt: { lt: new Date(ahora.getTime() - 10000) } }
+          ]
+        },
+        data: { lastBotMessageAt: new Date() }
+      })
+      if (locked.count === 0) continue // otro cron ya lo tomó → skip
+
       // GUARD CRÍTICO: solo procesar si el lead respondió DESPUÉS del bot
       // Si bot respondió después del lead → lead no ha respondido nada nuevo → skip
       if (conv.lastBotMessageAt && conv.lastLeadMessageAt) {
@@ -241,6 +256,19 @@ export async function ejecutarFollowup(prisma) {
     try {
       const instancia = conv.vendor?.instanciaEvolution
       if (!instancia) continue
+
+      // LOCK OPTIMISTA para reactivaciones
+      const lockedR = await prisma.conversation.updateMany({
+        where: {
+          id: conv.id,
+          OR: [
+            { lastBotMessageAt: null },
+            { lastBotMessageAt: { lt: new Date(ahora.getTime() - 10000) } }
+          ]
+        },
+        data: { lastBotMessageAt: new Date() }
+      })
+      if (lockedR.count === 0) continue
       const ultimoTs = conv.lastLeadMessageAt
         ? new Date(conv.lastLeadMessageAt).getTime()
         : new Date(conv.createdAt).getTime()
