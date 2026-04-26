@@ -220,10 +220,12 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
             })
           : null
 
+        // pasoActual = el último paso MSG que el bot envió (del que está esperando respuesta)
         const pasoActualStep = cam?.steps?.find(s => s.orden === (conv.currentStep || 0))
         const pasoSiguiente  = cam?.steps?.find(s => s.orden > (conv.currentStep || 0) && s.tipo === 'MSG')
 
-        if (pasoSiguiente && pasoActualStep) {
+        // Groq evalúa siempre que haya un paso actual del que esperar respuesta
+        if (pasoActualStep) {
           const historial = await prisma.message.findMany({
             where: { leadId: lead.id },
             orderBy: { createdAt: 'asc' },
@@ -239,7 +241,11 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
           })
 
           if (resultado && resultado.avanzar === false && resultado.respuesta) {
-            // Lead se desvió → Groq responde y regresa al flujo
+            // Lead se desvió → marcar lastBotMessageAt PRIMERO para bloquear followupEngine
+            await prisma.conversation.update({
+              where: { id: conv.id },
+              data: { lastBotMessageAt: new Date() }
+            }).catch(() => {})
             await sleep(800)
             await enviarTexto(instancia, numero, resultado.respuesta)
             await guardarMsg(prisma, lead.id, conv.id, 'BOT', resultado.respuesta)
