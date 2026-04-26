@@ -23,7 +23,8 @@
     "bcrypt": "^5.1.1",
     "googleapis": "^144.0.0",
     "node-fetch": "^3.3.2",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "@upstash/redis": "^1.34.0"
   },
   "devDependencies": {
     "prisma": "^5.22.0"
