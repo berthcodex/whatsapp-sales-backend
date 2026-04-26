@@ -2,8 +2,8 @@
 // Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
 // Multi-vendor ready + Guard de propiedad de leads
 // Router inteligente 2 capas — Groq como autoridad única
-// Guard anti-ruido 8s — sin conteo de mensajes
 // Fix: sanitización de botPrompt "" → "
+// Guard anti-ruido ELIMINADO — debounce + idempotencia en handler cubren todos los casos
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
@@ -266,23 +266,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           console.log(`[Guard] Lead ${telefono} → vendor dueño: ${vendorDueno.nombre}`)
         }
       }
-
-      // ── GUARD ANTI-RUIDO POST-BIENVENIDA ──────────────────
-      // 8s desde último mensaje del bot — sin conteo de mensajes
-      // Cubre ruido del Ad sin bloquear respuestas reales del lead
-      const convGuard = await prisma.conversation.findFirst({
-        where: { leadId: lead.id },
-        orderBy: { createdAt: 'desc' }
-      })
-
-      if (convGuard?.lastBotMessageAt) {
-        const msDesdeUltimoBot = new Date() - new Date(convGuard.lastBotMessageAt)
-        if (msDesdeUltimoBot < 8000) {
-          console.log(`[Guard] Anti-ruido: bot habló hace ${Math.round(msDesdeUltimoBot/1000)}s — ignorado: ${telefono}`)
-          return
-        }
-      }
-      // ── Fin guard anti-ruido ──────────────────────────────
 
       const conv = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
