@@ -1,8 +1,8 @@
-// src/webhook/stateEngine.js — Sprint 5 ESTABLE
-// ARQUITECTURA CORRECTA:
-// stateEngine  → solo guarda mensaje + actualiza timestamp
-// followupEngine → avanza pasos (20s de silencio)
-// Esta separación evita el choque entre los dos procesos
+// src/webhook/stateEngine.js — Sprint 5 DEFINITIVO
+// Groq presente en TODA la conversación:
+// - ACTIVE: protege el FlowBuilder, regresa leads desviados
+// - NOTIFIED: responde inteligentemente precio/horarios/dudas
+// FlowBuilder sigue siendo el esqueleto — Groq es el cerebro
 
 import { detectarCursoCampana } from './classifier.js'
 import { enviarTexto } from '../whatsapp/sender.js'
@@ -15,15 +15,11 @@ function norm(t) {
     .replace(/\s+/g, ' ').trim()
 }
 function contiene(texto, kws) {
-  const n = norm(texto)
-  return kws.some(kw => n.includes(norm(kw)))
+  return kws.some(kw => norm(texto).includes(norm(kw)))
 }
 
-const KW_RECLAMO    = ['no me llamaron','nadie me llamo','no me han llamado','cuando me llaman','no me contactaron']
-const KW_HORA       = ['llamame a','a las','pm','am','en la tarde','en la noche','mas tarde','despues']
-const KW_PRECIO     = ['cuanto cuesta','precio','costo','cuotas','descuento','inversion','cuanto es']
-const KW_INTERES    = ['me interesa','quiero inscribirme','como me inscribo','dale','listo','acepto','si quiero']
 const KW_NO_INTERES = ['ya no','no me interesa','gracias igual','olvidalo','no gracias','no quiero']
+const KW_LLAMADA   = ['llamame','llámame','me llama','llame','mañana','hoy a','esta tarde','a las']
 
 async function guardarMsg(prisma, leadId, convId, origen, texto) {
   try {
@@ -55,56 +51,94 @@ function interp(msg, vars) {
     .replace(/\{\{curso\}\}/g,    vars.curso     || '')
 }
 
-async function manejarNotificado({ prisma, instancia, numero, lead, conv, vendor, texto }) {
-  if (conv?.id) {
-    await prisma.conversation.update({
-      where: { id: conv.id },
-      data: { lastLeadMessageAt: new Date() }
-    }).catch(() => {})
-  }
+// ════════════════════════════════════════════════════════════
+// GROQ — cerebro de toda la conversación
+// Decide si el lead avanzó el flujo o se desvió
+// ════════════════════════════════════════════════════════════
+async function consultarGroq({ historial, textoActual, pasoActual, campaign, modo }) {
+  try {
+    if (!process.env.GROQ_API_KEY) return null
 
-  const enviar = async (msg) => {
-    await enviarTexto(instancia, numero, msg)
-    await guardarMsg(prisma, lead.id, conv?.id, 'BOT', msg)
-  }
-  const alertar = async (motivo) => {
-    if (vendor?.whatsappNumber)
-      await enviarTexto(instancia, vendor.whatsappNumber,
-        `${motivo}\n📱 wa.me/${lead.telefono}`).catch(() => {})
-  }
+    const promptBase = campaign?.botPrompt ||
+      `Eres un asesor de ventas de ${campaign?.nombre || 'Perú Exporta TV'}.
+Tu objetivo es que el lead se inscriba al curso de exportación.
+Responde siempre en español, de forma amable y directa.
+Máximo 3 líneas por respuesta.
+Si el lead pregunta precio: S/457 hasta el 30 de abril, luego S/757.
+Si el lead pregunta horarios: sábados 8-10am, online por Zoom.
+Si el lead pregunta certificado: sí, certificado ESCEX reconocido.
+Si el lead quiere que lo llamen: confirma que su asesor lo contactará pronto.
+Siempre termina con una pregunta o invitación a inscribirse.`
 
-  if (contiene(texto, KW_NO_INTERES)) {
-    await enviar(`Entendido 😊\n\nSi cambias de opinión, aquí estaremos.\n\n¡Mucho éxito!`)
-    await prisma.lead.update({ where: { id: lead.id }, data: { estado: 'CERRADO' } }).catch(() => {})
-    if (conv?.id) await prisma.conversation.update({ where: { id: conv.id }, data: { state: 'CLOSED' } }).catch(() => {})
-    return
+    const mensajesCtx = historial.slice(-10).map(m => ({
+      role: m.origen === 'LEAD' ? 'user' : 'assistant',
+      content: m.texto
+    }))
+
+    let systemPrompt = promptBase
+
+    // En modo ACTIVE: Groq decide si el lead respondió el paso o se desvió
+    if (modo === 'ACTIVE' && pasoActual) {
+      systemPrompt += `\n\nPASO ACTUAL DEL FLUJO: "${pasoActual}"
+Si el mensaje del lead ES una respuesta a esta pregunta → responde SOLO con: {"avanzar": true}
+Si el mensaje del lead NO es una respuesta (pregunta otra cosa, se desvía) → responde con una respuesta natural que conteste su duda Y lo regrese al paso actual. Formato: {"avanzar": false, "respuesta": "tu mensaje aquí"}`
+    }
+
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 4000)
+
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        max_tokens: 250,
+        temperature: 0.6,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...mensajesCtx,
+          { role: 'user', content: textoActual }
+        ]
+      })
+    })
+
+    clearTimeout(timeout)
+    if (!response.ok) return null
+
+    const data = await response.json()
+    const contenido = data.choices[0]?.message?.content?.trim()
+
+    // Intentar parsear JSON (modo ACTIVE)
+    if (modo === 'ACTIVE') {
+      try {
+        const parsed = JSON.parse(contenido)
+        return parsed
+      } catch {
+        // Si Groq no devolvió JSON → tratar como respuesta libre
+        return { avanzar: false, respuesta: contenido }
+      }
+    }
+
+    return { respuesta: contenido }
+
+  } catch (err) {
+    console.error('[Brain IA] Groq falló:', err.message)
+    return null
   }
-  if (contiene(texto, KW_RECLAMO)) {
-    await enviar(`Mil disculpas 🙏\n\nYa envié alerta urgente a tu asesor — te llama en minutos.`)
-    await alertar('⚠️ URGENTE — Lead reclama que nadie lo llamó')
-    return
-  }
-  if (contiene(texto, KW_HORA)) {
-    await enviar(`Perfecto! 📅\n\nLe aviso a tu asesor para que te llame en ese horario.`)
-    await alertar(`📌 Lead pidió hora: "${texto.slice(0, 60)}"`)
-    return
-  }
-  if (contiene(texto, KW_PRECIO)) {
-    await enviar(`¡Claro! 💰\n\nTenemos facilidades de pago en cuotas.\n\nTu asesor te explica todo cuando te llame hoy 😊`)
-    return
-  }
-  if (contiene(texto, KW_INTERES)) {
-    await enviar(`¡Genial! 🎉\n\nYa avisé a tu asesor — te llama muy pronto.\n\n¡Estate atento!`)
-    await alertar('🔄 Lead reconfirmó interés')
-    return
-  }
-  await enviar(`Con gusto 😊\n\n¿Tienes alguna pregunta sobre el programa o el precio? Un asesor de nuestro equipo te contactará pronto para orientarte.`)
 }
 
+// ════════════════════════════════════════════════════════════
+// MOTOR PRINCIPAL
+// ════════════════════════════════════════════════════════════
 export async function procesarConMotor({ prisma, instancia, numero, texto, tieneImagen, vendor }) {
   try {
     const lead = await prisma.lead.findUnique({ where: { telefono: numero } })
 
+    // ── LEAD EXISTENTE ────────────────────────────────────────
     if (lead) {
       const conv = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
@@ -132,21 +166,91 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
       const convState = conv?.state || 'ACTIVE'
       if (convState === 'CLOSED' || lead.estado === 'CERRADO') return
 
+      // ── NOTIFIED → Groq responde con contexto completo ──────
       if (convState === 'NOTIFIED' || lead.estado === 'NOTIFICADO') {
+
+        // Lead no quiere → cerrar
+        if (contiene(texto, KW_NO_INTERES)) {
+          const msg = `Entendido 😊\n\nSi cambias de opinión, aquí estaremos. ¡Mucho éxito!`
+          await enviarTexto(instancia, numero, msg)
+          await guardarMsg(prisma, lead.id, conv?.id, 'BOT', msg)
+          await prisma.lead.update({ where: { id: lead.id }, data: { estado: 'CERRADO' } }).catch(() => {})
+          if (conv?.id) await prisma.conversation.update({ where: { id: conv.id }, data: { state: 'CLOSED' } }).catch(() => {})
+          return
+        }
+
+        // Alerta al vendedor si pide llamada
+        if (contiene(texto, KW_LLAMADA) && vendor?.whatsappNumber) {
+          await enviarTexto(instancia, vendor.whatsappNumber,
+            `📞 Lead pide llamada\n📱 wa.me/${lead.telefono}\n💬 "${texto.slice(0, 100)}"`
+          ).catch(() => {})
+        }
+
         const cam = lead.campaignId
-          ? await prisma.campaign.findUnique({ where: { id: lead.campaignId }, include: { vendor: true } })
+          ? await prisma.campaign.findUnique({ where: { id: lead.campaignId } })
           : null
-        await manejarNotificado({
-          prisma, instancia, numero, lead,
-          conv: conv || null,
-          vendor: cam?.vendor || vendor,
-          texto
+
+        const historial = await prisma.message.findMany({
+          where: { leadId: lead.id },
+          orderBy: { createdAt: 'asc' },
+          take: 20
         })
+
+        const resultado = await consultarGroq({
+          historial, textoActual: texto,
+          campaign: cam, modo: 'NOTIFIED'
+        })
+
+        const msgFinal = resultado?.respuesta ||
+          `Un asesor de nuestro equipo te contactará muy pronto 😊\n¿Tienes alguna otra consulta sobre el programa?`
+
+        await enviarTexto(instancia, numero, msgFinal)
+        await guardarMsg(prisma, lead.id, conv?.id, 'BOT', msgFinal)
+        console.log(`[Brain IA] NOTIFIED: ${numero}`)
         return
       }
 
-      // ACTIVE → solo actualizar timestamp
-      // El followupEngine avanza los pasos con 20s de silencio
+      // ── ACTIVE → Groq evalúa si el lead respondió el paso ───
+      // Solo si hay GROQ_API_KEY — si no, solo actualizar timestamp
+      if (process.env.GROQ_API_KEY && conv?.id) {
+        const cam = lead.campaignId
+          ? await prisma.campaign.findUnique({
+              where: { id: lead.campaignId },
+              include: { steps: { orderBy: { orden: 'asc' } } }
+            })
+          : null
+
+        const pasoActualStep = cam?.steps?.find(s => s.orden === (conv.currentStep || 0))
+        const pasoSiguiente  = cam?.steps?.find(s => s.orden > (conv.currentStep || 0) && s.tipo === 'MSG')
+
+        if (pasoSiguiente && pasoActualStep) {
+          const historial = await prisma.message.findMany({
+            where: { leadId: lead.id },
+            orderBy: { createdAt: 'asc' },
+            take: 10
+          })
+
+          const resultado = await consultarGroq({
+            historial,
+            textoActual: texto,
+            pasoActual: pasoActualStep.mensaje,
+            campaign: cam,
+            modo: 'ACTIVE'
+          })
+
+          if (resultado && resultado.avanzar === false && resultado.respuesta) {
+            // Lead se desvió → Groq responde y regresa al flujo
+            await sleep(800)
+            await enviarTexto(instancia, numero, resultado.respuesta)
+            await guardarMsg(prisma, lead.id, conv.id, 'BOT', resultado.respuesta)
+            console.log(`[Brain IA] ACTIVE desvío corregido: ${numero}`)
+            return
+          }
+          // Si avanzar === true → dejar que followupEngine avance el paso normalmente
+        }
+      }
+
+      // ACTIVE sin Groq o lead respondió correctamente → actualizar timestamp
       await prisma.lead.update({
         where: { id: lead.id },
         data: { ultimoMensaje: new Date() }
@@ -189,10 +293,8 @@ export async function procesarConMotor({ prisma, instancia, numero, texto, tiene
 
     const msgBienvenida = paso1?.mensaje
       ? interp(paso1.mensaje, {
-          telefono: numero,
-          vendedor: vendor?.nombre || '',
-          curso: campaign?.nombre || '',
-          nombre: ''
+          telefono: numero, vendedor: vendor?.nombre || '',
+          curso: campaign?.nombre || '', nombre: ''
         })
       : `Hola 👋 te saluda *Perú Exporta TV* 🇵🇪\n\nCuéntame: ¿cómo te llamas y qué producto tienes en mente para exportar? 👇`
 
