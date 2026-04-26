@@ -57,11 +57,13 @@ export async function ejecutarFollowup(prisma) {
   const ahora = new Date()
   let procesados = 0
 
-  // ── FASE 1: Avanzar pasos FlowBuilder ──────────────────────
   const convsActivas = await prisma.conversation.findMany({
     where: {
       state: { in: ['ACTIVE', 'REACTIVATED'] },
-      lastLeadMessageAt: { lt: new Date(ahora.getTime() - SEG_SILENCIO * 1000) }
+      lastLeadMessageAt: {
+        not: null,
+        lt: new Date(ahora.getTime() - SEG_SILENCIO * 1000)
+      }
     },
     include: {
       lead: true,
@@ -72,9 +74,15 @@ export async function ejecutarFollowup(prisma) {
 
   for (const conv of convsActivas) {
     try {
-      // Skip si bot ya respondió después del último mensaje del lead
-      if (conv.lastBotMessageAt && conv.lastLeadMessageAt &&
-          conv.lastBotMessageAt >= conv.lastLeadMessageAt) continue
+      // GUARD CRÍTICO: solo procesar si el lead respondió DESPUÉS del bot
+      // Si bot respondió después del lead → lead no ha respondido nada nuevo → skip
+      if (conv.lastBotMessageAt && conv.lastLeadMessageAt) {
+        const botTs  = new Date(conv.lastBotMessageAt).getTime()
+        const leadTs = new Date(conv.lastLeadMessageAt).getTime()
+        if (botTs >= leadTs) continue // bot ya respondió al último mensaje del lead
+      }
+      // Si lastLeadMessageAt es null → lead nunca respondió → skip (no avanzar pasos)
+      if (!conv.lastLeadMessageAt) continue
 
       const instancia = conv.vendor?.instanciaEvolution
       if (!instancia) continue
