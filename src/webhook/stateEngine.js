@@ -1,10 +1,11 @@
-// src/motor/stateEngine.js — v2 HIDATA 200X
+// src/webhook/stateEngine.js — v3 HIDATA 111X
 // Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
 // Multi-vendor ready + Guard de propiedad de leads
+// Router inteligente 2 capas — Groq como autoridad única
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
-import { detectarCursoCampana } from '../webhook/classifier.js'
+import { resolverCampaign } from './routerInteligente.js'
 import { enviarTexto } from '../whatsapp/sender.js'
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -18,20 +19,6 @@ async function guardarMsg(leadId, convId, origen, texto) {
       data: { leadId, conversationId: convId || null, origen, texto }
     })
   } catch(e) { console.error('[Motor] guardarMsg:', e.message) }
-}
-
-async function getCampaign(slug) {
-  if (slug) {
-    const c = await prisma.campaign.findUnique({
-      where: { slug },
-      include: { steps: { orderBy: { orden: 'asc' } } }
-    })
-    if (c) return c
-  }
-  return await prisma.campaign.findFirst({
-    where: { activa: true },
-    include: { steps: { orderBy: { orden: 'asc' } } }
-  })
 }
 
 function interp(msg, vars) {
@@ -256,8 +243,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     if (lead) {
 
       // ── GUARD DE PROPIEDAD — multi-vendor ─────────────────
-      // Regla: el primer vendor que captura un lead es su dueño
-      // para siempre. Si escribe a otro vendor, se redirige solo.
       let vendorActivo    = vendor
       let instanciaActiva = instancia
 
@@ -278,7 +263,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           console.log(`[Guard] Lead ${telefono} → vendor dueño: ${vendorDueno.nombre}`)
         }
       }
-      // ── Fin guard ─────────────────────────────────────────
 
       const conv = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
@@ -314,7 +298,9 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       })
 
       const cam = lead.campaignId
-        ? await prisma.campaign.findUnique({ where: { id: lead.campaignId } })
+        ? await prisma.campaign.findUnique({
+            where: { id: lead.campaignId }
+          })
         : null
 
       // ── GROQ — autoridad única ───────────────────────────
@@ -331,7 +317,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       const respuesta = resultado?.respuesta ||
         `Un momento, déjame revisar 😊`
 
-      // Marcar lastBotMessageAt ANTES de enviar — anti race condition
       if (conv?.id) {
         await prisma.conversation.update({
           where: { id: conv.id },
@@ -362,29 +347,30 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     }
 
     // ════════════════════════════════════════════════════════
-    // LEAD NUEVO
+    // LEAD NUEVO — Router inteligente 2 capas
+    // Capa 1: trigger exact match desde BD
+    // Capa 2: Groq árbitro para orgánicos
     // ════════════════════════════════════════════════════════
-    const cursoCampana = detectarCursoCampana(mensaje)
-    const campaign = await getCampaign(cursoCampana?.slug)
+    const campaign = await resolverCampaign(mensaje, prisma)
 
     const newLead = await prisma.lead.create({
       data: {
         telefono,
-        campaignId: campaign?.id || null,
-        vendorId:   vendor.id,
-        pasoActual: 0,
-        estado:     'EN_FLUJO',
+        campaignId:    campaign?.id || null,
+        vendorId:      vendor.id,
+        pasoActual:    0,
+        estado:        'EN_FLUJO',
         ultimoMensaje: new Date()
       }
     })
 
     const conv = await prisma.conversation.create({
       data: {
-        leadId:     newLead.id,
-        campaignId: campaign?.id || null,
-        vendorId:   vendor.id,
-        state:      'ACTIVE',
-        currentStep: 0,
+        leadId:            newLead.id,
+        campaignId:        campaign?.id || null,
+        vendorId:          vendor.id,
+        state:             'ACTIVE',
+        currentStep:       0,
         lastLeadMessageAt: new Date()
       }
     }).catch(async () => {
@@ -426,7 +412,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       data: { pasoActual: paso1?.orden || 1 }
     })
 
-    console.log(`[Motor] Lead nuevo: ${telefono} | vendor: ${vendor.nombre} | campaign: ${campaign?.slug || 'orgánico'}`)
+    console.log(`[Motor] Lead nuevo: ${telefono} | vendor: ${vendor.nombre} | campaign: ${campaign?.slug || 'sin campaña'}`)
 
   } catch (err) {
     console.error('[Motor] Error crítico:', err.message)
