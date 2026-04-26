@@ -1,17 +1,23 @@
-// src/webhook/handler.js — v4 HIDATA 111X
-// Multi-vendor ready: debounce por instancia:telefono
-// presence.update adaptativo — composing/paused
-// Guard: ignora grupos @g.us y broadcasts
-// Guard: idempotencia por message ID — anti-duplicados Evolution API
+// src/webhook/handler.js — v7 HIDATA 111X
+// Redis Debounce 9s — estándar industria adaptado a leads 40+ años Peru Exporta
+// Resiliente a reinicios de Render — timer en Redis, no en memoria
+// Guard: grupos @g.us y broadcasts ignorados
+// Guard: idempotencia por message ID
+// Redis lock — anti doble disparo
 
 import { processIncoming } from './stateEngine.js'
+import { Redis } from '@upstash/redis'
 
-const DEBOUNCE_COMPOSING_MS = 5000
-const DEBOUNCE_PAUSED_MS    = 1500
+const redis = new Redis({
+  url:   process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+})
 
-const debounceMap  = new Map()
-const procesadosId = new Set() // idempotencia — últimos 500 message IDs
-const MAX_IDS      = 500
+const DEBOUNCE_MS = 9000  // 9s — leads 40+ años Peru Exporta
+const MAX_IDS     = 500
+
+const procesadosId = new Set()
+const timerMap     = new Map()
 
 async function handleWebhook(req, reply) {
   try {
@@ -19,43 +25,12 @@ async function handleWebhook(req, reply) {
     const event     = body?.event
     const instancia = body?.instance || ''
 
-    // ── PRESENCE.UPDATE ──────────────────────────────────────
-    if (event === 'presence.update') {
-      const rawId    = body?.data?.id || ''
-      const telefono = rawId.replace('@s.whatsapp.net', '')
-      const presences = body?.data?.presences || {}
-      const presence  = presences[rawId]?.lastKnownPresence
-                     || presences[telefono]?.lastKnownPresence
-
-      const key = `${instancia}:${telefono}`
-
-      if (telefono && debounceMap.has(key)) {
-        if (presence === 'composing') {
-          clearTimeout(debounceMap.get(key).timer)
-          debounceMap.get(key).timer = setTimeout(
-            () => dispararBrain(key, instancia, telefono),
-            DEBOUNCE_COMPOSING_MS
-          )
-          console.log(`[Handler] composing → reset 5s: ${telefono}`)
-        } else if (presence === 'paused') {
-          clearTimeout(debounceMap.get(key).timer)
-          debounceMap.get(key).timer = setTimeout(
-            () => dispararBrain(key, instancia, telefono),
-            DEBOUNCE_PAUSED_MS
-          )
-          console.log(`[Handler] paused → reduce 1.5s: ${telefono}`)
-        }
-      }
-      return reply.send({ ok: true })
-    }
-
-    // ── MESSAGES.UPSERT ──────────────────────────────────────
+    if (event === 'presence.update') return reply.send({ ok: true })
     if (event !== 'messages.upsert') return reply.send({ ok: true })
 
     const msg = body?.data?.messages?.[0] || body?.data
     if (!msg) return reply.send({ ok: true })
 
-    // ── GUARD: fromMe ────────────────────────────────────────
     if (msg?.key?.fromMe) return reply.send({ ok: true })
 
     // ── GUARD: grupos y broadcasts ───────────────────────────
@@ -74,8 +49,7 @@ async function handleWebhook(req, reply) {
       }
       procesadosId.add(msgId)
       if (procesadosId.size > MAX_IDS) {
-        const first = procesadosId.values().next().value
-        procesadosId.delete(first)
+        procesadosId.delete(procesadosId.values().next().value)
       }
     }
 
@@ -89,21 +63,33 @@ async function handleWebhook(req, reply) {
     if (!texto && !esImagen) return reply.send({ ok: true })
 
     const contenido = esImagen ? '__IMAGE__' : texto
-    const key       = `${instancia}:${telefono}`
+    const bufferKey = `buffer:${instancia}:${telefono}`
+    const timerKey  = `${instancia}:${telefono}`
 
-    if (debounceMap.has(key)) {
-      clearTimeout(debounceMap.get(key).timer)
-      debounceMap.get(key).buffer += '\n' + contenido
+    // ── REDIS DEBOUNCE 9s — reset en cada mensaje ────────────
+    const bufferExiste = await redis.exists(bufferKey)
+
+    if (!bufferExiste) {
+      // Primer mensaje — crea buffer
+      await redis.set(bufferKey, contenido, { ex: 60 })
+      console.log(`[Handler] Buffer START: ${telefono} | "${contenido.slice(0, 50)}"`)
     } else {
-      debounceMap.set(key, { buffer: contenido, timer: null })
+      // Mensaje adicional — acumula
+      await redis.append(bufferKey, '\n' + contenido)
+      console.log(`[Handler] Buffer APPEND: ${telefono} | "${contenido.slice(0, 50)}"`)
     }
 
-    debounceMap.get(key).timer = setTimeout(
-      () => dispararBrain(key, instancia, telefono),
-      DEBOUNCE_COMPOSING_MS
-    )
+    // Reset timer en cada mensaje — 9s de silencio = terminó
+    if (timerMap.has(timerKey)) {
+      clearTimeout(timerMap.get(timerKey))
+    }
 
-    console.log(`[Handler] buffer acumulado (${debounceMap.get(key).buffer.split('\n').length} msgs): ${telefono}`)
+    const timer = setTimeout(async () => {
+      timerMap.delete(timerKey)
+      await dispararBrain(instancia, telefono)
+    }, DEBOUNCE_MS)
+
+    timerMap.set(timerKey, timer)
 
     return reply.send({ ok: true })
 
@@ -113,17 +99,38 @@ async function handleWebhook(req, reply) {
   }
 }
 
-async function dispararBrain(key, instancia, telefono) {
-  const entry = debounceMap.get(key)
-  debounceMap.delete(key)
-  if (!entry?.buffer) return
-  console.log(`[Handler] DISPARO → ${instancia}:${telefono}: "${entry.buffer.slice(0, 80)}"`)
-  await processIncoming({
-    telefono,
-    mensaje:  entry.buffer,
-    esImagen: entry.buffer.includes('__IMAGE__'),
-    instancia
-  })
+async function dispararBrain(instancia, telefono) {
+  const bufferKey = `buffer:${instancia}:${telefono}`
+  const lockKey   = `lock:${instancia}:${telefono}`
+
+  try {
+    // Lock anti-doble disparo
+    const lock = await redis.set(lockKey, '1', { nx: true, ex: 15 })
+    if (lock !== 'OK') {
+      console.log(`[Handler] Disparo duplicado ignorado: ${telefono}`)
+      return
+    }
+
+    const buffer = await redis.get(bufferKey)
+    await redis.del(bufferKey)
+
+    if (!buffer) return
+
+    const mensaje = buffer.toString()
+    console.log(`[Handler] DISPARO → ${instancia}:${telefono}: "${mensaje.slice(0, 100)}"`)
+
+    await processIncoming({
+      telefono,
+      mensaje,
+      esImagen: mensaje.includes('__IMAGE__'),
+      instancia
+    })
+
+  } catch(err) {
+    console.error('[Handler] dispararBrain error:', err.message)
+  } finally {
+    await redis.del(lockKey).catch(() => {})
+  }
 }
 
 export { handleWebhook }
