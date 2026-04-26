@@ -256,12 +256,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     if (lead) {
 
       // ── GUARD DE PROPIEDAD — multi-vendor ─────────────────
-      // Regla de negocio: el primer vendor que captura un lead
-      // es su dueño para siempre.
-      // Si el lead escribe a otro vendor:
-      //   1. Sistema responde desde la instancia del vendor dueño
-      //   2. Notifica al vendor dueño que su lead escribió por otro número
-      //   3. El lead NUNCA sabe que escribió a otro número
+      // Regla: el primer vendor que captura un lead es su dueño
+      // para siempre. Si escribe a otro vendor, se redirige solo.
       let vendorActivo    = vendor
       let instanciaActiva = instancia
 
@@ -279,7 +275,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           }
           vendorActivo    = vendorDueno
           instanciaActiva = vendorDueno.instanciaEvolution
-          console.log(`[Guard] Lead ${telefono} redirigido a vendor dueño: ${vendorDueno.nombre}`)
+          console.log(`[Guard] Lead ${telefono} → vendor dueño: ${vendorDueno.nombre}`)
         }
       }
       // ── Fin guard ─────────────────────────────────────────
