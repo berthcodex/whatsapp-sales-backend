@@ -1,5 +1,8 @@
+// src/webhook/handler.js — v3 HIDATA 200X
+// Multi-vendor ready: debounce por instancia:telefono
+// presence.update adaptativo — respeta ritmo del usuario 40+
+
 const { processIncoming } = require('../motor/stateEngine')
-const evolutionApi = require('../plugins/evolutionApi')
 
 const DEBOUNCE_MS = 5000
 const debounceMap = new Map()
@@ -9,14 +12,21 @@ async function handleWebhook(req, reply) {
     const body = req.body
     const event = body?.event
 
-    // ── PRESENCE UPDATE — resetea debounce si el lead sigue escribiendo ──
+    // ── Instancia — identifica qué vendor recibe el mensaje ──
+    const instancia = body?.instance || ''
+
+    // ── PRESENCE UPDATE — debounce adaptativo ───────────────
+    // Si el lead sigue escribiendo, resetea el timer
+    // Respeta el ritmo de usuarios 40+ que escriben lento
     if (event === 'presence.update') {
       const telefono = body?.data?.id?.replace('@s.whatsapp.net', '')
       const presence = body?.data?.presences?.[telefono]?.lastKnownPresence
-      if (telefono && presence === 'composing' && debounceMap.has(telefono)) {
-        clearTimeout(debounceMap.get(telefono).timer)
-        debounceMap.get(telefono).timer = setTimeout(
-          () => dispararBrain(telefono),
+      const key = `${instancia}:${telefono}`
+
+      if (telefono && presence === 'composing' && debounceMap.has(key)) {
+        clearTimeout(debounceMap.get(key).timer)
+        debounceMap.get(key).timer = setTimeout(
+          () => dispararBrain(key, instancia, telefono),
           DEBOUNCE_MS
         )
       }
@@ -32,50 +42,55 @@ async function handleWebhook(req, reply) {
     if (fromMe) return reply.send({ ok: true })
 
     const telefono = msg?.key?.remoteJid?.replace('@s.whatsapp.net', '')
+    if (!telefono) return reply.send({ ok: true })
 
-    // ── IMAGEN — manejo por estado, no hardcoded ──
+    // ── Detectar tipo de mensaje ─────────────────────────────
     const esImagen = !!(msg?.message?.imageMessage)
     const texto = msg?.message?.conversation ||
                   msg?.message?.extendedTextMessage?.text || ''
 
-    if (!telefono) return reply.send({ ok: true })
     if (!texto && !esImagen) return reply.send({ ok: true })
 
     const contenido = esImagen ? '__IMAGE__' : texto
 
-    // ── ACUMULADOR con debounce adaptativo ──
-    if (debounceMap.has(telefono)) {
-      clearTimeout(debounceMap.get(telefono).timer)
-      debounceMap.get(telefono).buffer += '\n' + contenido
+    // ── Clave única por instancia + teléfono ─────────────────
+    // Joan:lead → "peru-exporta-joan:51938188585"
+    // Cristina:lead → "peru-exporta-cristina:51912345678"
+    // Francisco:lead → "peru-exporta-francisco:51987654321"
+    const key = `${instancia}:${telefono}`
+
+    if (debounceMap.has(key)) {
+      clearTimeout(debounceMap.get(key).timer)
+      debounceMap.get(key).buffer += '\n' + contenido
     } else {
-      debounceMap.set(telefono, { buffer: contenido, timer: null })
+      debounceMap.set(key, { buffer: contenido, timer: null })
     }
 
-    debounceMap.get(telefono).timer = setTimeout(
-      () => dispararBrain(telefono),
+    debounceMap.get(key).timer = setTimeout(
+      () => dispararBrain(key, instancia, telefono),
       DEBOUNCE_MS
     )
 
     return reply.send({ ok: true })
+
   } catch (err) {
     req.log.error(err)
     return reply.code(500).send({ error: 'Internal error' })
   }
 }
 
-async function dispararBrain(telefono) {
-  const mensajeCompleto = debounceMap.get(telefono)?.buffer
-  debounceMap.delete(telefono)
+async function dispararBrain(key, instancia, telefono) {
+  const mensajeCompleto = debounceMap.get(key)?.buffer
+  debounceMap.delete(key)
   if (!mensajeCompleto) return
 
-  console.log(`[Handler] → ${telefono}: "${mensajeCompleto.slice(0, 80)}"`)
+  console.log(`[Handler] ${instancia} → ${telefono}: "${mensajeCompleto.slice(0, 80)}"`)
 
   await processIncoming({
     telefono,
-    mensaje: mensajeCompleto,
-    esImagen: mensajeCompleto.includes('__IMAGE__'),
-    sendMessage: async (to, text) => await evolutionApi.sendText(to, text),
-    notifyVendor: async (vendorTelefono, text) => await evolutionApi.sendText(vendorTelefono, text)
+    mensaje:   mensajeCompleto,
+    esImagen:  mensajeCompleto.includes('__IMAGE__'),
+    instancia
   })
 }
 
