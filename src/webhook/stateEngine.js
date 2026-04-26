@@ -1,12 +1,10 @@
-// src/webhook/stateEngine.js — v6 HIDATA 111X
-// Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
+// src/webhook/stateEngine.js — v7 HIDATA 111X
+// Vendor Intelligence Layer — flow_steps del vendedor pasados a Groq
+// Groq potencia los mensajes del vendedor con contexto del lead
+// El vendedor controla el guión. Groq lo ejecuta con inteligencia.
 // Multi-vendor ready + Guard de propiedad de leads
 // Router inteligente 2 capas — Groq como autoridad única
-// Fix: sanitización de botPrompt "" → "
-// Fix: parser robusto — extrae JSON aunque Groq escriba texto antes
-// Fix: prompt reforzado — instrucción crítica de formato
-// Fix: Redis lock — anti doble respuesta multi-ventana
-// Fix: instrucción explícita — Groq no se vuelve a presentar
+// Redis lock — anti doble respuesta
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
@@ -22,18 +20,14 @@ const redis = new Redis({
 })
 
 // ════════════════════════════════════════════════════════════
-// REDIS LOCK — anti doble respuesta
+// REDIS LOCK
 // ════════════════════════════════════════════════════════════
 async function adquirirLock(telefono) {
   try {
-    const result = await redis.set(
-      `lock:${telefono}`,
-      '1',
-      { nx: true, ex: 15 }
-    )
+    const result = await redis.set(`lock:${telefono}`, '1', { nx: true, ex: 15 })
     return result === 'OK'
   } catch(e) {
-    console.error('[Lock] Redis error adquirir:', e.message)
+    console.error('[Lock] Redis error:', e.message)
     return true
   }
 }
@@ -66,12 +60,14 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v5 — autoridad única, devuelve JSON estructurado
-// Fix v5: instrucción explícita — no volver a presentarse
-// Fix v4: prompt con instrucción crítica de formato
-// Fix v4: parser robusto extrae JSON aunque venga con texto antes
+// GROQ BRAIN v7 — Vendor Intelligence Layer
+// Recibe flow_steps del vendedor + botPrompt + contexto del lead
+// Groq potencia los mensajes del vendedor con inteligencia
 // ════════════════════════════════════════════════════════════
-async function consultarGroq({ historial, textoActual, esImagen, convState, perfilActual, botPrompt, campaignNombre }) {
+async function consultarGroq({
+  historial, textoActual, esImagen, convState,
+  perfilActual, botPrompt, campaignNombre, pasosVendedor
+}) {
   try {
     if (!process.env.GROQ_API_KEY) return null
 
@@ -80,40 +76,50 @@ async function consultarGroq({ historial, textoActual, esImagen, convState, perf
       : `Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta TV'}.
 Tu misión es calificar al lead, no venderle. El cierre es por teléfono.
 Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
-Nunca reveles que eres IA. Si preguntan: "Soy Jhon, asesor de Peru Exporta TV 😊"
-Precio: S/457 hasta el 30 de abril, luego S/757.`
+Nunca reveles que eres IA.`
 
-    // Detectar si el bot ya envió mensajes previos
+    // Construir contexto de pasos del vendedor
+    const pasosCtx = pasosVendedor?.length
+      ? `
+════════════════════════════════════════
+PASOS_DEL_VENDEDOR — CONTENIDO EXACTO
+Estos son los mensajes que el vendedor escribió para cada momento.
+Úsalos como base. Potencialos con el contexto del lead.
+NUNCA los ignores. NUNCA los reordenes.
+════════════════════════════════════════
+${pasosVendedor
+  .filter(p => p.tipo === 'MSG')
+  .map((p, i) => `PASO ${p.orden}:\n${p.mensaje}`)
+  .join('\n\n---\n\n')}
+`
+      : ''
+
     const botYaHablo = historial.some(m => m.origen === 'BOT')
     const mensajesBot = historial.filter(m => m.origen === 'BOT').length
 
     const systemPrompt =
 `${promptBase}
 
-CONTEXTO TÉCNICO DEL LEAD (nunca lo menciones al lead):
-- Estado actual de la conversación: ${convState}
-- Perfil recopilado hasta ahora: ${JSON.stringify(perfilActual)}
-- Recibió imagen: ${esImagen}
-- Mensajes previos del bot: ${mensajesBot}
-${botYaHablo ? `- CRÍTICO: Ya te presentaste al lead. NO vuelvas a saludar ni a decir "Hola" ni a presentarte como Jhon nuevamente. Continúa el flujo conversacional desde donde quedó.` : ''}
+${pasosCtx}
 
-ANTES DE RESPONDER analiza internamente:
-1. ¿Qué intención real tiene este mensaje?
-2. ¿Qué datos nuevos me dio el lead?
-3. ¿En qué paso del flujo estamos?
-4. ¿Qué acción debe ejecutar el sistema?
+CONTEXTO TÉCNICO DEL LEAD (nunca lo menciones al lead):
+- Estado de la conversación: ${convState}
+- Perfil recopilado: ${JSON.stringify(perfilActual)}
+- Mensajes del bot enviados: ${mensajesBot}
+- Recibió imagen: ${esImagen}
+${botYaHablo ? '- CRÍTICO: Ya te presentaste. NO vuelvas a saludar ni a presentarte.' : ''}
 
 INSTRUCCIÓN CRÍTICA DE FORMATO:
 Tu respuesta COMPLETA debe ser ÚNICAMENTE el objeto JSON.
 NO escribas nada antes del JSON.
 NO escribas nada después del JSON.
-NO uses markdown, backticks, ni explicaciones.
-El primer carácter de tu respuesta debe ser { y el último }.
+El primer carácter debe ser { y el último }.
 
 {
-  "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|SOLICITA_LLAMADA|REACTIVACION|IMAGEN_PRODUCTO|COMPROBANTE|DESVIO",
+  "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|SOLICITA_LLAMADA|REACTIVACION|IMAGEN_PRODUCTO|COMPROBANTE|DESVIO|PREGUNTA_INFO",
   "respuesta": "texto que se envía al lead como Jhon humano",
   "accion": "NINGUNA|CERRAR_LEAD|PEDIR_COMPROBANTE|NOTIFICAR_VENDEDOR|CAMBIAR_ESTADO_PAYMENT",
+  "pasoActual": 1,
   "datosExtraidos": {
     "nombre": null,
     "edad": null,
@@ -121,7 +127,8 @@ El primer carácter de tu respuesta debe ser { y el último }.
     "experiencia": null,
     "tieneEmpresa": null,
     "horarioLlamada": null,
-    "conocePrecio": null
+    "conocePrecio": null,
+    "consultaConOtro": null
   },
   "perfilScore": 0
 }`
@@ -132,7 +139,7 @@ El primer carácter de tu respuesta debe ser { y el último }.
     }))
 
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 5000)
+    const timeout = setTimeout(() => controller.abort(), 8000)
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -143,8 +150,8 @@ El primer carácter de tu respuesta debe ser { y el último }.
       },
       body: JSON.stringify({
         model: 'llama-3.3-70b-versatile',
-        max_tokens: 400,
-        temperature: 0.4,
+        max_tokens: 600,
+        temperature: 0.3,
         messages: [
           { role: 'system', content: systemPrompt },
           ...mensajesCtx,
@@ -162,7 +169,6 @@ El primer carácter de tu respuesta debe ser { y el último }.
     const data = await response.json()
     const contenido = data.choices[0]?.message?.content?.trim()
 
-    // Parser robusto — extrae JSON aunque Groq escriba texto antes o después
     const limpio = (() => {
       const match = contenido.match(/\{[\s\S]*\}/)
       return match ? match[0] : contenido
@@ -171,7 +177,7 @@ El primer carácter de tu respuesta debe ser { y el último }.
     try {
       return JSON.parse(limpio)
     } catch {
-      console.error('[Brain IA] JSON parse falló, contenido raw:', contenido?.slice(0, 200))
+      console.error('[Brain IA] JSON parse falló:', contenido?.slice(0, 200))
       return {
         intencion: 'FLUJO_NORMAL',
         respuesta: contenido,
@@ -228,7 +234,7 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) 
           const score    = lead.perfilScore       || 0
           const emoji    = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
           const briefing =
-`${emoji} LEAD SOLICITA LLAMADA
+`${emoji} LEAD LISTO PARA LLAMADA
 
 📱 wa.me/${lead.telefono}
 👤 ${nombre}
@@ -280,7 +286,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     })
 
     if (!vendor) {
-      console.error(`[Motor] Vendor no encontrado para instancia: ${instancia}`)
+      console.error(`[Motor] Vendor no encontrado: ${instancia}`)
       return
     }
 
@@ -344,9 +350,10 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         }
 
         const perfilActual = {
-          nombre:   lead.nombreDetectado   || null,
-          producto: lead.productoDetectado || null,
-          estado:   lead.estado            || null
+          nombre:        lead.nombreDetectado   || null,
+          producto:      lead.productoDetectado || null,
+          estado:        lead.estado            || null,
+          pasoActual:    lead.pasoActual        || 1
         }
 
         const historial = await prisma.message.findMany({
@@ -355,20 +362,26 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           take: 15
         })
 
+        // ── Campaña + pasos del vendedor ─────────────────────
         const cam = lead.campaignId
           ? await prisma.campaign.findUnique({
-              where: { id: lead.campaignId }
+              where: { id: lead.campaignId },
+              include: { steps: { orderBy: { orden: 'asc' } } }
             })
           : null
 
+        const pasosVendedor = cam?.steps || []
+
+        // ── GROQ — Vendor Intelligence Layer ─────────────────
         const resultado = await consultarGroq({
           historial,
-          textoActual: mensaje,
+          textoActual:    mensaje,
           esImagen,
           convState,
           perfilActual,
-          botPrompt:      cam?.botPrompt || null,
-          campaignNombre: cam?.nombre    || 'Peru Exporta TV'
+          botPrompt:      cam?.botPrompt     || null,
+          campaignNombre: cam?.nombre        || 'Peru Exporta TV',
+          pasosVendedor
         })
 
         const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
@@ -388,6 +401,14 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           await actualizarPerfil(lead.id, resultado.datosExtraidos)
         }
 
+        // Actualizar paso actual si Groq lo detectó
+        if (resultado?.pasoActual && resultado.pasoActual !== lead.pasoActual) {
+          await prisma.lead.update({
+            where: { id: lead.id },
+            data: { pasoActual: resultado.pasoActual }
+          }).catch(() => {})
+        }
+
         if (resultado?.accion && resultado.accion !== 'NINGUNA' && conv?.id) {
           await ejecutarAccion({
             accion:    resultado.accion,
@@ -398,7 +419,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           })
         }
 
-        console.log(`[Brain IA] ${convState} → ${resultado?.intencion || 'FLUJO_NORMAL'} | accion: ${resultado?.accion || 'NINGUNA'} | vendor: ${vendorActivo.nombre} | ${telefono}`)
+        console.log(`[Brain IA] paso:${resultado?.pasoActual || '?'} → ${resultado?.intencion || 'FLUJO_NORMAL'} | accion: ${resultado?.accion || 'NINGUNA'} | vendor: ${vendorActivo.nombre} | ${telefono}`)
 
       } finally {
         await liberarLock(telefono)
@@ -417,7 +438,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         telefono,
         campaignId:    campaign?.id || null,
         vendorId:      vendor.id,
-        pasoActual:    0,
+        pasoActual:    1,
         estado:        'EN_FLUJO',
         ultimoMensaje: new Date()
       }
@@ -429,7 +450,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         campaignId:        campaign?.id || null,
         vendorId:          vendor.id,
         state:             'ACTIVE',
-        currentStep:       0,
+        currentStep:       1,
         lastLeadMessageAt: new Date()
       }
     }).catch(async () => {
@@ -460,16 +481,11 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       await prisma.conversation.update({
         where: { id: conv.id },
         data: {
-          currentStep:      paso1?.orden || 1,
+          currentStep:      1,
           lastBotMessageAt: new Date()
         }
       })
     }
-
-    await prisma.lead.update({
-      where: { id: newLead.id },
-      data: { pasoActual: paso1?.orden || 1 }
-    })
 
     console.log(`[Motor] Lead nuevo: ${telefono} | vendor: ${vendor.nombre} | campaign: ${campaign?.slug || 'sin campaña'}`)
 
