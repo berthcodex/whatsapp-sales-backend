@@ -1,9 +1,10 @@
-// src/webhook/stateEngine.js — v4 HIDATA 111X
+// src/webhook/stateEngine.js — v5 HIDATA 111X
 // Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
 // Multi-vendor ready + Guard de propiedad de leads
 // Router inteligente 2 capas — Groq como autoridad única
 // Fix: sanitización de botPrompt "" → "
-// Guard anti-ruido ELIMINADO — debounce + idempotencia en handler cubren todos los casos
+// Fix: parser robusto — extrae JSON aunque Groq escriba texto antes
+// Fix: prompt reforzado — instrucción crítica de formato
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
@@ -32,9 +33,9 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v3 — autoridad única, devuelve JSON estructurado
-// Cerebro decide. Código ejecuta. Nunca al revés.
-// Fix: botPrompt sanitizado — "" → " antes de enviar a Groq
+// GROQ BRAIN v4 — autoridad única, devuelve JSON estructurado
+// Fix: prompt con instrucción crítica de formato
+// Fix: parser robusto extrae JSON aunque venga con texto antes
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({ historial, textoActual, esImagen, convState, perfilActual, botPrompt, campaignNombre }) {
   try {
@@ -61,7 +62,13 @@ ANTES DE RESPONDER analiza internamente:
 2. ¿Qué datos nuevos me dio el lead?
 3. ¿Qué acción debe ejecutar el sistema?
 
-RESPONDE ÚNICAMENTE EN JSON VÁLIDO — SIN TEXTO ADICIONAL, SIN MARKDOWN, SIN BACKTICKS:
+INSTRUCCIÓN CRÍTICA DE FORMATO:
+Tu respuesta COMPLETA debe ser ÚNICAMENTE el objeto JSON.
+NO escribas nada antes del JSON.
+NO escribas nada después del JSON.
+NO uses markdown, backticks, ni explicaciones.
+El primer carácter de tu respuesta debe ser { y el último }.
+
 {
   "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|SOLICITA_LLAMADA|REACTIVACION|IMAGEN_PRODUCTO|COMPROBANTE|DESVIO",
   "respuesta": "texto que se envía al lead como Jhon humano",
@@ -114,10 +121,11 @@ RESPONDE ÚNICAMENTE EN JSON VÁLIDO — SIN TEXTO ADICIONAL, SIN MARKDOWN, SIN 
     const data = await response.json()
     const contenido = data.choices[0]?.message?.content?.trim()
 
-    const limpio = contenido
-      .replace(/```json/gi, '')
-      .replace(/```/g, '')
-      .trim()
+    // Parser robusto — extrae JSON aunque Groq escriba texto antes o después
+    const limpio = (() => {
+      const match = contenido.match(/\{[\s\S]*\}/)
+      return match ? match[0] : contenido
+    })()
 
     try {
       return JSON.parse(limpio)
@@ -314,7 +322,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         convState,
         perfilActual,
         botPrompt:      cam?.botPrompt || null,
-        campaignNombre: cam?.nombre    || 'Peru Exporta'
+        campaignNombre: cam?.nombre    || 'Peru Exporta TV'
       })
 
       const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
@@ -391,7 +399,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           curso:    campaign?.nombre || '',
           nombre:   ''
         })
-      : `Hola 👋 te saluda Peru Exporta\n\n¿Cómo te llamas y qué producto tienes en mente para exportar? 👇`
+      : `Hola 👋 Soy Jhon, asesor de Peru Exporta TV 😊\n\n¿Cómo te llamas y qué producto tienes en mente para exportar?`
 
     await sleep(1000)
     await enviarTexto(instancia, telefono, msgBienvenida)
