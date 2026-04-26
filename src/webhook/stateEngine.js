@@ -1,40 +1,74 @@
-// src/motor/stateEngine.js — v2 HIDATA 100X
-// Groq como autoridad única. Código como músculo.
+// src/motor/stateEngine.js — v2 HIDATA 200X
 // Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
+// Multi-vendor ready: Joan, Cristina, Francisco y cualquier vendor futuro
 
+import prisma from '../db/prisma.js'
 import { detectarCursoCampana } from '../webhook/classifier.js'
 import { enviarTexto } from '../whatsapp/sender.js'
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v2 — autoridad única, devuelve JSON estructurado
+// HELPERS
+// ════════════════════════════════════════════════════════════
+async function guardarMsg(leadId, convId, origen, texto) {
+  try {
+    await prisma.message.create({
+      data: { leadId, conversationId: convId || null, origen, texto }
+    })
+  } catch(e) { console.error('[Motor] guardarMsg:', e.message) }
+}
+
+async function getCampaign(slug) {
+  if (slug) {
+    const c = await prisma.campaign.findUnique({
+      where: { slug },
+      include: { steps: { orderBy: { orden: 'asc' } } }
+    })
+    if (c) return c
+  }
+  return await prisma.campaign.findFirst({
+    where: { activa: true },
+    include: { steps: { orderBy: { orden: 'asc' } } }
+  })
+}
+
+function interp(msg, vars) {
+  return (msg || '')
+    .replace(/\{\{telefono\}\}/g, vars.telefono || '')
+    .replace(/\{\{nombre\}\}/g,   vars.nombre   || '')
+    .replace(/\{\{vendedor\}\}/g, vars.vendedor  || '')
+    .replace(/\{\{curso\}\}/g,    vars.curso     || '')
+}
+
+// ════════════════════════════════════════════════════════════
+// GROQ BRAIN v2 — autoridad única, JSON estructurado
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({ historial, textoActual, esImagen, convState, perfilActual, botPrompt, campaignNombre }) {
   try {
     if (!process.env.GROQ_API_KEY) return null
 
     const promptBase = botPrompt ||
-      `Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta'}.
+`Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta'}.
 Tu misión es calificar al lead, no venderle. El cierre es por teléfono.
 Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
 Nunca reveles que eres IA. Si preguntan: "Soy Jhon, asesor de Peru Exporta 😊"
 Precio: S/457 hasta el 30 de abril, luego S/757.`
 
-    const systemPrompt = `${promptBase}
+    const systemPrompt =
+`${promptBase}
 
-CONTEXTO TÉCNICO DEL LEAD (no menciones esto al lead):
-- Estado actual: ${convState}
+CONTEXTO TÉCNICO DEL LEAD (nunca lo menciones al lead):
+- Estado actual de la conversación: ${convState}
 - Perfil recopilado hasta ahora: ${JSON.stringify(perfilActual)}
-- Es imagen: ${esImagen}
+- Recibió imagen: ${esImagen}
 
-ANÁLISIS REQUERIDO:
-Antes de responder analiza internamente:
+ANTES DE RESPONDER analiza internamente:
 1. ¿Qué intención real tiene este mensaje?
 2. ¿Qué datos nuevos me dio el lead?
 3. ¿Qué acción debe ejecutar el sistema?
 
-RESPONDE ÚNICAMENTE EN JSON VÁLIDO, SIN TEXTO ADICIONAL, SIN MARKDOWN:
+RESPONDE ÚNICAMENTE EN JSON VÁLIDO — SIN TEXTO ADICIONAL, SIN MARKDOWN, SIN BACKTICKS:
 {
   "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|SOLICITA_LLAMADA|REACTIVACION|IMAGEN_PRODUCTO|COMPROBANTE|DESVIO",
   "respuesta": "texto que se envía al lead como Jhon humano",
@@ -79,12 +113,15 @@ RESPONDE ÚNICAMENTE EN JSON VÁLIDO, SIN TEXTO ADICIONAL, SIN MARKDOWN:
     })
 
     clearTimeout(timeout)
-    if (!response.ok) return null
+    if (!response.ok) {
+      console.error('[Brain IA] Groq HTTP error:', response.status)
+      return null
+    }
 
     const data = await response.json()
     const contenido = data.choices[0]?.message?.content?.trim()
 
-    // Parsear JSON — limpieza defensiva
+    // Parseo defensivo — limpia markdown si Groq lo agrega
     const limpio = contenido
       .replace(/```json/gi, '')
       .replace(/```/g, '')
@@ -93,7 +130,8 @@ RESPONDE ÚNICAMENTE EN JSON VÁLIDO, SIN TEXTO ADICIONAL, SIN MARKDOWN:
     try {
       return JSON.parse(limpio)
     } catch {
-      // Groq no devolvió JSON válido → respuesta libre como fallback
+      // Groq no devolvió JSON válido → fallback con respuesta libre
+      console.error('[Brain IA] JSON parse falló, usando respuesta libre')
       return {
         intencion: 'FLUJO_NORMAL',
         respuesta: contenido,
@@ -111,22 +149,25 @@ RESPONDE ÚNICAMENTE EN JSON VÁLIDO, SIN TEXTO ADICIONAL, SIN MARKDOWN:
 
 // ════════════════════════════════════════════════════════════
 // PROFILE BUILDER — acumula perfil del lead en Supabase
+// Solo escribe campos que Groq extrajo — no sobreescribe con null
 // ════════════════════════════════════════════════════════════
-async function actualizarPerfil(prisma, leadId, datosExtraidos, perfilScore) {
+async function actualizarPerfil(leadId, datosExtraidos) {
   try {
     const updates = {}
-    if (datosExtraidos.nombre)     updates.nombreDetectado   = datosExtraidos.nombre
-    if (datosExtraidos.producto)   updates.productoDetectado = datosExtraidos.producto
+    if (datosExtraidos?.nombre)   updates.nombreDetectado   = datosExtraidos.nombre
+    if (datosExtraidos?.producto) updates.productoDetectado = datosExtraidos.producto
     if (Object.keys(updates).length > 0) {
       await prisma.lead.update({ where: { id: leadId }, data: updates })
+      console.log(`[ProfileBuilder] Actualizado: ${JSON.stringify(updates)}`)
     }
   } catch(e) { console.error('[ProfileBuilder]', e.message) }
 }
 
 // ════════════════════════════════════════════════════════════
-// ACTION EXECUTOR — código puro ejecuta lo que Groq decidió
+// ACTION EXECUTOR — código puro, ejecuta lo que Groq decidió
+// Cerebro decide. Músculo ejecuta. Nunca al revés.
 // ════════════════════════════════════════════════════════════
-async function ejecutarAccion({ accion, prisma, lead, conv, instancia, vendor, texto }) {
+async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) {
   try {
     switch (accion) {
 
@@ -144,9 +185,19 @@ async function ejecutarAccion({ accion, prisma, lead, conv, instancia, vendor, t
 
       case 'NOTIFICAR_VENDEDOR':
         if (vendor?.whatsappNumber) {
-          const perfil = lead.nombreDetectado || 'Sin nombre'
+          const nombre  = lead.nombreDetectado  || 'Sin nombre'
           const producto = lead.productoDetectado || 'Sin producto'
-          const briefing = `📞 LEAD SOLICITA LLAMADA\n\n📱 wa.me/${lead.telefono}\n👤 ${perfil}\n📦 ${producto}\n💬 "${texto?.slice(0, 100)}"\n\n⚡ Llama ahora — está esperando`
+          const score   = lead.perfilScore       || 0
+          const emoji   = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
+          const briefing =
+`${emoji} LEAD SOLICITA LLAMADA
+
+📱 wa.me/${lead.telefono}
+👤 ${nombre}
+📦 ${producto}
+💬 "${texto?.slice(0, 100)}"
+
+⚡ ${score >= 7 ? 'Llama AHORA — alta prioridad' : 'Llama hoy'}`
           await enviarTexto(instancia, vendor.whatsappNumber, briefing).catch(() => {})
         }
         await prisma.conversation.update({
@@ -157,7 +208,7 @@ async function ejecutarAccion({ accion, prisma, lead, conv, instancia, vendor, t
         break
 
       case 'PEDIR_COMPROBANTE':
-        // Solo registrar estado — la respuesta ya la envió Groq
+        // Groq ya envió el mensaje — solo logueamos
         console.log(`[ActionExecutor] PEDIR_COMPROBANTE: ${lead.telefono}`)
         break
 
@@ -182,103 +233,41 @@ async function ejecutarAccion({ accion, prisma, lead, conv, instancia, vendor, t
 }
 
 // ════════════════════════════════════════════════════════════
-// VENDOR BRIEFING COMPLETO — ficha de calidad YC-level
-// ════════════════════════════════════════════════════════════
-function construirBriefing({ lead, clasif, historial, campaignNombre }) {
-  const score = clasif?.perfilScore || 0
-  const emoji = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
-  const nombre = lead.nombreDetectado || 'Sin nombre'
-  const producto = lead.productoDetectado || 'Sin producto'
-  const historialTexto = historial
-    .filter(m => m.origen === 'LEAD')
-    .slice(-5)
-    .map(m => `  › "${m.texto.slice(0, 80)}"`)
-    .join('\n')
-
-  return `${emoji} LEAD CALIFICADO — SCORE ${score}/10
-
-📱 wa.me/${lead.telefono}
-👤 ${nombre}
-📦 ${producto}
-📊 Perfil: ${score >= 7 ? 'ALTA PRIORIDAD' : score >= 4 ? 'MEDIA' : 'BAJA'}
-
-💬 Últimas respuestas:
-${historialTexto}
-
-⚡ Tip de cierre: ${
-  producto !== 'Sin producto'
-    ? `Pregúntale por la región y volumen de ${producto}. Ya tiene producto concreto.`
-    : 'Ayúdalo a identificar su producto primero.'
-}
-
-📞 Llama ${score >= 7 ? 'AHORA' : 'hoy'}`
-}
-
-// ════════════════════════════════════════════════════════════
-// HELPERS
-// ════════════════════════════════════════════════════════════
-async function guardarMsg(prisma, leadId, convId, origen, texto) {
-  try {
-    await prisma.message.create({
-      data: { leadId, conversationId: convId || null, origen, texto }
-    })
-  } catch(e) { console.error('[Motor] guardarMsg:', e.message) }
-}
-
-async function getCampaign(prisma, slug) {
-  if (slug) {
-    const c = await prisma.campaign.findUnique({
-      where: { slug },
-      include: { vendor: true, steps: { orderBy: { orden: 'asc' } } }
-    })
-    if (c) return c
-  }
-  return await prisma.campaign.findFirst({
-    where: { activa: true },
-    include: { vendor: true, steps: { orderBy: { orden: 'asc' } } }
-  })
-}
-
-function interp(msg, vars) {
-  return (msg || '')
-    .replace(/\{\{telefono\}\}/g, vars.telefono || '')
-    .replace(/\{\{nombre\}\}/g,   vars.nombre   || '')
-    .replace(/\{\{vendedor\}\}/g, vars.vendedor  || '')
-    .replace(/\{\{curso\}\}/g,    vars.curso     || '')
-}
-
-// ════════════════════════════════════════════════════════════
 // ENTRY POINT — llamado desde handler.js
+// instancia viene del webhook — identifica al vendor correcto
 // ════════════════════════════════════════════════════════════
-export async function processIncoming({ telefono, mensaje, esImagen, sendMessage, notifyVendor, prisma: prismaExterno }) {
-  // prisma se importa aquí para no romper el patrón existente
-  const { default: prisma } = prismaExterno
-    ? { default: prismaExterno }
-    : await import('../db/prisma.js')
-
+export async function processIncoming({ telefono, mensaje, esImagen, instancia }) {
   try {
-    // ── Buscar vendor por instancia ──────────────────────────
+
+    // ── Vendor por instancia — multi-vendor ready ────────────
+    // Joan → instancia "peru-exporta-joan"
+    // Cristina → instancia "peru-exporta-cristina"
+    // Francisco → instancia "peru-exporta-francisco"
     const vendor = await prisma.vendor.findFirst({
-      where: { activo: true, esAdmin: true }
+      where: { instanciaEvolution: instancia, activo: true }
     })
-    if (!vendor) return
 
-    const instancia = vendor.instanciaEvolution
+    if (!vendor) {
+      console.error(`[Motor] Vendor no encontrado para instancia: ${instancia}`)
+      return
+    }
 
-    // ── Buscar lead existente ────────────────────────────────
+    // ── Lead existente ───────────────────────────────────────
     const lead = await prisma.lead.findUnique({ where: { telefono } })
 
-    // ════════════════════════════════════════════════
+    // ════════════════════════════════════════
     // LEAD EXISTENTE
-    // ════════════════════════════════════════════════
+    // ════════════════════════════════════════
     if (lead) {
       const conv = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
         orderBy: { createdAt: 'desc' }
       })
 
-      await guardarMsg(prisma, lead.id, conv?.id || null, 'LEAD', esImagen ? '[imagen]' : mensaje)
+      // Guardar mensaje del lead
+      await guardarMsg(lead.id, conv?.id || null, 'LEAD', esImagen ? '[imagen]' : mensaje)
 
+      // Actualizar timestamp del lead
       if (conv?.id) {
         await prisma.conversation.update({
           where: { id: conv.id },
@@ -287,42 +276,48 @@ export async function processIncoming({ telefono, mensaje, esImagen, sendMessage
       }
 
       const convState = conv?.state || 'ACTIVE'
-      if (convState === 'CLOSED' || lead.estado === 'CERRADO') return
 
-      // Perfil actual acumulado
-      const perfilActual = {
-        nombre: lead.nombreDetectado || null,
-        producto: lead.productoDetectado || null
+      // Guard — conversación cerrada
+      if (convState === 'CLOSED' || lead.estado === 'CERRADO') {
+        console.log(`[Motor] Lead cerrado ignorado: ${telefono}`)
+        return
       }
 
-      // Historial de conversación
+      // Perfil acumulado hasta ahora
+      const perfilActual = {
+        nombre:    lead.nombreDetectado   || null,
+        producto:  lead.productoDetectado || null,
+        estado:    lead.estado            || null
+      }
+
+      // Historial completo para contexto de Groq
       const historial = await prisma.message.findMany({
         where: { leadId: lead.id },
         orderBy: { createdAt: 'asc' },
         take: 15
       })
 
-      // Campaign y botPrompt
+      // Campaign y botPrompt del vendor
       const cam = lead.campaignId
         ? await prisma.campaign.findUnique({ where: { id: lead.campaignId } })
         : null
 
-      // ── GROQ como autoridad única ────────────────────────
+      // ── GROQ — autoridad única ───────────────────────────
       const resultado = await consultarGroq({
         historial,
         textoActual: mensaje,
         esImagen,
         convState,
         perfilActual,
-        botPrompt: cam?.botPrompt || null,
-        campaignNombre: cam?.nombre || 'Peru Exporta'
+        botPrompt:      cam?.botPrompt  || null,
+        campaignNombre: cam?.nombre     || 'Peru Exporta'
       })
 
       // Fallback si Groq falla
       const respuesta = resultado?.respuesta ||
-        `Un momento, déjame revisar tu consulta 😊`
+        `Un momento, déjame revisar 😊`
 
-      // Marcar lastBotMessageAt ANTES de enviar (anti race condition)
+      // Marcar lastBotMessageAt ANTES de enviar — anti race condition
       if (conv?.id) {
         await prisma.conversation.update({
           where: { id: conv.id },
@@ -330,80 +325,88 @@ export async function processIncoming({ telefono, mensaje, esImagen, sendMessage
         }).catch(() => {})
       }
 
+      // Enviar respuesta al lead
       await sleep(800)
       await enviarTexto(instancia, telefono, respuesta)
-      await guardarMsg(prisma, lead.id, conv?.id || null, 'BOT', respuesta)
+      await guardarMsg(lead.id, conv?.id || null, 'BOT', respuesta)
 
-      // Profile Builder — acumula datos extraídos por Groq
+      // Profile Builder — acumula datos extraídos
       if (resultado?.datosExtraidos) {
-        await actualizarPerfil(prisma, lead.id, resultado.datosExtraidos, resultado.perfilScore)
+        await actualizarPerfil(lead.id, resultado.datosExtraidos)
       }
 
-      // Action Executor — ejecuta lo que Groq decidió
+      // Action Executor — ejecuta acción de Groq
       if (resultado?.accion && resultado.accion !== 'NINGUNA' && conv?.id) {
         await ejecutarAccion({
-          accion: resultado.accion,
-          prisma, lead, conv,
+          accion:    resultado.accion,
+          lead, conv,
           instancia, vendor,
           texto: mensaje
         })
       }
 
-      // Log
-      console.log(`[Brain IA] ${convState} → ${resultado?.intencion || 'FLUJO_NORMAL'}: ${telefono}`)
+      console.log(`[Brain IA] ${convState} → ${resultado?.intencion || 'FLUJO_NORMAL'} | accion: ${resultado?.accion || 'NINGUNA'} | ${telefono}`)
       return
     }
 
-    // ════════════════════════════════════════════════
+    // ════════════════════════════════════════
     // LEAD NUEVO
-    // ════════════════════════════════════════════════
+    // ════════════════════════════════════════
     const cursoCampana = detectarCursoCampana(mensaje)
-    const campaign = await getCampaign(prisma, cursoCampana?.slug)
+    const campaign = await getCampaign(cursoCampana?.slug)
 
     const newLead = await prisma.lead.create({
       data: {
         telefono,
-        campaignId: campaign?.id || null,
-        vendorId: vendor.id,
+        campaignId: campaign?.id  || null,
+        vendorId:   vendor.id,
         pasoActual: 0,
-        estado: 'EN_FLUJO',
+        estado:     'EN_FLUJO',
         ultimoMensaje: new Date()
       }
     })
 
     const conv = await prisma.conversation.create({
       data: {
-        leadId: newLead.id,
+        leadId:     newLead.id,
         campaignId: campaign?.id || null,
-        vendorId: vendor.id,
-        state: 'ACTIVE',
+        vendorId:   vendor.id,
+        state:      'ACTIVE',
         currentStep: 0,
         lastLeadMessageAt: new Date()
       }
     }).catch(async () => {
-      return await prisma.conversation.findFirst({ where: { leadId: newLead.id } })
+      return await prisma.conversation.findFirst({
+        where: { leadId: newLead.id }
+      })
     })
 
-    await guardarMsg(prisma, newLead.id, conv?.id || null, 'LEAD', mensaje)
+    await guardarMsg(newLead.id, conv?.id || null, 'LEAD', mensaje)
 
+    // Primer mensaje del FlowBuilder
     const pasos = campaign?.steps?.filter(s => s.tipo === 'MSG') || []
     const paso1 = pasos[0]
 
     const msgBienvenida = paso1?.mensaje
       ? interp(paso1.mensaje, {
-          telefono, vendedor: vendor?.nombre || '',
-          curso: campaign?.nombre || '', nombre: ''
+          telefono,
+          vendedor: vendor?.nombre  || '',
+          curso:    campaign?.nombre || '',
+          nombre:   ''
         })
       : `Hola 👋 te saluda Peru Exporta\n\n¿Cómo te llamas y qué producto tienes en mente para exportar? 👇`
 
     await sleep(1000)
     await enviarTexto(instancia, telefono, msgBienvenida)
-    await guardarMsg(prisma, newLead.id, conv?.id || null, 'BOT', msgBienvenida)
+    await guardarMsg(newLead.id, conv?.id || null, 'BOT', msgBienvenida)
 
     if (conv?.id) {
       await prisma.conversation.update({
         where: { id: conv.id },
-        data: { currentStep: paso1?.orden || 1, lastBotMessageAt: new Date() }
+        data: {
+          currentStep:      paso1?.orden || 1,
+          lastBotMessageAt: new Date()
+        }
       })
     }
 
@@ -412,9 +415,9 @@ export async function processIncoming({ telefono, mensaje, esImagen, sendMessage
       data: { pasoActual: paso1?.orden || 1 }
     })
 
-    console.log(`[Motor] Lead nuevo: ${telefono} | ${campaign?.slug || 'orgánico'}`)
+    console.log(`[Motor] Lead nuevo: ${telefono} | vendor: ${vendor.nombre} | campaign: ${campaign?.slug || 'orgánico'}`)
 
   } catch (err) {
-    console.error('[Motor] Error:', err.message)
+    console.error('[Motor] Error crítico:', err.message)
   }
 }
