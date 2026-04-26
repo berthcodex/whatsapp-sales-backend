@@ -1,4 +1,4 @@
-// src/webhook/stateEngine.js — v5 HIDATA 111X
+// src/webhook/stateEngine.js — v6 HIDATA 111X
 // Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
 // Multi-vendor ready + Guard de propiedad de leads
 // Router inteligente 2 capas — Groq como autoridad única
@@ -6,6 +6,7 @@
 // Fix: parser robusto — extrae JSON aunque Groq escriba texto antes
 // Fix: prompt reforzado — instrucción crítica de formato
 // Fix: Redis lock — anti doble respuesta multi-ventana
+// Fix: instrucción explícita — Groq no se vuelve a presentar
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
@@ -22,8 +23,6 @@ const redis = new Redis({
 
 // ════════════════════════════════════════════════════════════
 // REDIS LOCK — anti doble respuesta
-// Mientras Groq procesa un lead, bloquea nuevos disparos
-// Lock expira en 15s por seguridad — nunca queda pegado
 // ════════════════════════════════════════════════════════════
 async function adquirirLock(telefono) {
   try {
@@ -35,7 +34,7 @@ async function adquirirLock(telefono) {
     return result === 'OK'
   } catch(e) {
     console.error('[Lock] Redis error adquirir:', e.message)
-    return true // si Redis falla, dejamos pasar — mejor doble respuesta que silencio
+    return true
   }
 }
 
@@ -67,9 +66,10 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v4 — autoridad única, devuelve JSON estructurado
-// Fix: prompt con instrucción crítica de formato
-// Fix: parser robusto extrae JSON aunque venga con texto antes
+// GROQ BRAIN v5 — autoridad única, devuelve JSON estructurado
+// Fix v5: instrucción explícita — no volver a presentarse
+// Fix v4: prompt con instrucción crítica de formato
+// Fix v4: parser robusto extrae JSON aunque venga con texto antes
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({ historial, textoActual, esImagen, convState, perfilActual, botPrompt, campaignNombre }) {
   try {
@@ -83,6 +83,10 @@ Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
 Nunca reveles que eres IA. Si preguntan: "Soy Jhon, asesor de Peru Exporta TV 😊"
 Precio: S/457 hasta el 30 de abril, luego S/757.`
 
+    // Detectar si el bot ya envió mensajes previos
+    const botYaHablo = historial.some(m => m.origen === 'BOT')
+    const mensajesBot = historial.filter(m => m.origen === 'BOT').length
+
     const systemPrompt =
 `${promptBase}
 
@@ -90,11 +94,14 @@ CONTEXTO TÉCNICO DEL LEAD (nunca lo menciones al lead):
 - Estado actual de la conversación: ${convState}
 - Perfil recopilado hasta ahora: ${JSON.stringify(perfilActual)}
 - Recibió imagen: ${esImagen}
+- Mensajes previos del bot: ${mensajesBot}
+${botYaHablo ? `- CRÍTICO: Ya te presentaste al lead. NO vuelvas a saludar ni a decir "Hola" ni a presentarte como Jhon nuevamente. Continúa el flujo conversacional desde donde quedó.` : ''}
 
 ANTES DE RESPONDER analiza internamente:
 1. ¿Qué intención real tiene este mensaje?
 2. ¿Qué datos nuevos me dio el lead?
-3. ¿Qué acción debe ejecutar el sistema?
+3. ¿En qué paso del flujo estamos?
+4. ¿Qué acción debe ejecutar el sistema?
 
 INSTRUCCIÓN CRÍTICA DE FORMATO:
 Tu respuesta COMPLETA debe ser ÚNICAMENTE el objeto JSON.
@@ -181,7 +188,7 @@ El primer carácter de tu respuesta debe ser { y el último }.
 }
 
 // ════════════════════════════════════════════════════════════
-// PROFILE BUILDER — acumula perfil del lead en Supabase
+// PROFILE BUILDER
 // ════════════════════════════════════════════════════════════
 async function actualizarPerfil(leadId, datosExtraidos) {
   try {
@@ -306,7 +313,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         }
       }
 
-      // ── REDIS LOCK — anti doble respuesta ─────────────────
+      // ── REDIS LOCK ────────────────────────────────────────
       const lockAdquirido = await adquirirLock(telefono)
       if (!lockAdquirido) {
         console.log(`[Lock] Lead en proceso — ignorado: ${telefono}`)
