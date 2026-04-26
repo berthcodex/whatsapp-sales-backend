@@ -2,6 +2,7 @@
 // Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
 // Multi-vendor ready + Guard de propiedad de leads
 // Router inteligente 2 capas — Groq como autoridad única
+// Guard anti-ruido post-bienvenida — 15s ventana
 // Joan, Cristina, Francisco — sin conflictos
 
 import prisma from '../db/prisma.js'
@@ -152,7 +153,6 @@ async function actualizarPerfil(leadId, datosExtraidos) {
 
 // ════════════════════════════════════════════════════════════
 // ACTION EXECUTOR — código puro ejecuta lo que Groq decidió
-// Cerebro decide. Músculo ejecuta. Nunca al revés.
 // ════════════════════════════════════════════════════════════
 async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) {
   try {
@@ -224,7 +224,7 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) 
 export async function processIncoming({ telefono, mensaje, esImagen, instancia }) {
   try {
 
-    // ── Vendor por instancia — multi-vendor ready ────────────
+    // ── Vendor por instancia ─────────────────────────────────
     const vendor = await prisma.vendor.findFirst({
       where: { instanciaEvolution: instancia, activo: true }
     })
@@ -263,6 +263,29 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           console.log(`[Guard] Lead ${telefono} → vendor dueño: ${vendorDueno.nombre}`)
         }
       }
+
+      // ── GUARD ANTI-RUIDO POST-BIENVENIDA ──────────────────
+      // Caso real: lead hace click en Ad → mensaje predeterminado
+      // + inmediatamente escribe algo más o error de tipeo
+      // Si el bot acaba de saludar (< 15s) y el lead no ha
+      // respondido nada real aún → ignorar ruido
+      const convGuard = await prisma.conversation.findFirst({
+        where: { leadId: lead.id },
+        orderBy: { createdAt: 'desc' }
+      })
+
+      if (convGuard?.lastBotMessageAt) {
+        const msDesdeUltimoBot = new Date() - new Date(convGuard.lastBotMessageAt)
+        const totalMensajesLead = await prisma.message.count({
+          where: { leadId: lead.id, origen: 'LEAD' }
+        })
+
+        if (msDesdeUltimoBot < 15000 && totalMensajesLead <= 1) {
+          console.log(`[Guard] Anti-ruido: bot habló hace ${Math.round(msDesdeUltimoBot/1000)}s, lead no ha respondido aún — ignorado: ${telefono}`)
+          return
+        }
+      }
+      // ── Fin guard anti-ruido ──────────────────────────────
 
       const conv = await prisma.conversation.findFirst({
         where: { leadId: lead.id },
@@ -314,8 +337,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         campaignNombre: cam?.nombre    || 'Peru Exporta'
       })
 
-      const respuesta = resultado?.respuesta ||
-        `Un momento, déjame revisar 😊`
+      const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
 
       if (conv?.id) {
         await prisma.conversation.update({
@@ -348,8 +370,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
     // ════════════════════════════════════════════════════════
     // LEAD NUEVO — Router inteligente 2 capas
-    // Capa 1: trigger exact match desde BD
-    // Capa 2: Groq árbitro para orgánicos
     // ════════════════════════════════════════════════════════
     const campaign = await resolverCampaign(mensaje, prisma)
 
