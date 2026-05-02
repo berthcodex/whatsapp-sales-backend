@@ -1,12 +1,8 @@
-// src/webhook/stateEngine.js — v9 HIDATA 111X
-// Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
-// NUEVO: Código controla el flujo. Groq ejecuta. Nunca al revés.
-// El momento actual lo decide el código, no Groq.
-// Fix v9: detección de horario confirmado → Momento 6 → NOTIFICAR_VENDEDOR
-// Multi-vendor ready + Guard de propiedad de leads
-// Router inteligente 2 capas — Groq como autoridad única
-// Redis lock — anti doble respuesta
-// Joan, Cristina, Francisco — sin conflictos
+// src/webhook/stateEngine.js — v11 HIDATA 111X
+// Fix v11: bot usa nombre real del vendedor — cero confusión de identidad
+// Fix v11: briefing rico con deep link personalizado
+// Fix v11: deep link con mensaje de confirmación — no de presentación
+// Código controla el flujo. Groq ejecuta. Nunca al revés.
 
 import prisma from '../db/prisma.js'
 import { resolverCampaign } from './routerInteligente.js'
@@ -61,13 +57,31 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
+// EXTRACTOR DE HORARIO — del último mensaje del lead
+// ════════════════════════════════════════════════════════════
+function extraerHorario(texto) {
+  if (!texto) return null
+  const patterns = [
+    /(\d{1,2}:\d{2}\s*(?:am|pm)?)/i,
+    /(\d{1,2}\s*(?:am|pm))/i,
+    /(mañana\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
+    /(hoy\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
+    /(mañana|hoy|tarde|noche|mediodía)/i,
+  ]
+  for (const p of patterns) {
+    const m = texto.match(p)
+    if (m) return m[1]
+  }
+  return texto.slice(0, 30)
+}
+
+// ════════════════════════════════════════════════════════════
 // DETECTOR DE MOMENTO — el código decide, no Groq
 // ════════════════════════════════════════════════════════════
 function detectarMomento(lead, historial) {
   const botMensajes  = historial.filter(m => m.origen === 'BOT').map(m => m.texto.toLowerCase())
   const leadMensajes = historial.filter(m => m.origen === 'LEAD').map(m => m.texto.toLowerCase())
 
-  // ── Detectar si ya presentamos el programa ───────────────
   const yaPresento = botMensajes.some(m =>
     m.includes('exporta con 1,000') ||
     m.includes('curso taller') ||
@@ -75,7 +89,6 @@ function detectarMomento(lead, historial) {
     m.includes('inscripcion anticipada')
   )
 
-  // ── Detectar si el lead confirmó horario ─────────────────
   const yaPreguntoHorario = botMensajes.some(m =>
     m.includes('qué hora') ||
     m.includes('que hora') ||
@@ -94,11 +107,9 @@ function detectarMomento(lead, historial) {
     /\d+:\d+/.test(m)
   )
 
-  if (leadConfirmoHorario) return 6  // Cierre + NOTIFICAR_VENDEDOR
+  if (leadConfirmoHorario) return 6
+  if (yaPresento)          return 5
 
-  if (yaPresento) return 5  // Coordinar llamada
-
-  // ── Detectar si ya preguntamos empresa ───────────────────
   const yaPreguntoEmpresa = botMensajes.some(m =>
     m.includes('empresa constituida') ||
     m.includes('independiente')
@@ -113,10 +124,9 @@ function detectarMomento(lead, historial) {
     m.includes('formal') || m.includes('informal')
   )
 
-  if (leadRespondioEmpresa) return 4  // Presentar programa
-  if (yaPreguntoEmpresa)    return 3  // Esperando empresa
+  if (leadRespondioEmpresa) return 4
+  if (yaPreguntoEmpresa)    return 3
 
-  // ── Detectar si ya preguntamos experiencia ───────────────
   const yaPreguntoExperiencia = botMensajes.some(m =>
     m.includes('experiencia exportando') ||
     m.includes('empezando desde cero')
@@ -130,26 +140,28 @@ function detectarMomento(lead, historial) {
     m.includes('ya exporté') || m.includes('sí exporto')
   )
 
-  if (leadRespondioExperiencia) return 3  // Preguntar empresa
-  if (yaPreguntoExperiencia)    return 2  // Esperando experiencia
+  if (leadRespondioExperiencia) return 3
+  if (yaPreguntoExperiencia)    return 2
 
-  return 2  // Default — preguntar experiencia
+  return 2
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v9 — Código controla el flujo. Groq ejecuta.
+// GROQ BRAIN v11
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({
   historial, textoActual, esImagen, convState,
   perfilActual, botPrompt, campaignNombre,
-  pasosVendedor, momentoActual
+  pasosVendedor, momentoActual, nombreVendedor
 }) {
   try {
     if (!process.env.GROQ_API_KEY) return null
 
     const promptBase = botPrompt
-      ? botPrompt.replace(/""/g, '"')
-      : `Eres Jhon, asesor de ${campaignNombre || 'Peru Exporta TV'}.
+      ? botPrompt
+          .replace(/""/g, '"')
+          .replace(/\[NOMBRE_ASESOR\]/g, nombreVendedor)
+      : `Eres ${nombreVendedor}, asesor de ${campaignNombre || 'Peru Exporta TV'}.
 Tu misión es calificar al lead, no venderle. El cierre es por teléfono.
 Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
 Nunca reveles que eres IA.`
@@ -166,7 +178,7 @@ ${pasosVendedor
 `
       : ''
 
-    const nombre  = perfilActual.nombre  || ''
+    const nombre   = perfilActual.nombre  || ''
     const producto = perfilActual.producto || ''
 
     const instruccionMomento = `
@@ -187,29 +199,29 @@ Ejemplo: "Muchas gracias ${nombre} 😊 El ${producto} tiene bastante potencial 
 ${momentoActual === 3 ? `
 MOMENTO 3 — SITUACIÓN EMPRESARIAL:
 Pregunta si tiene empresa o trabaja independiente.
-Mensaje exacto: "Entiendo 😊 Y cuéntame ${nombre}, ¿tienes empresa constituida o por ahora trabajas de manera independiente?"
+Mensaje: "Entiendo 😊 Y cuéntame ${nombre}, ¿tienes empresa constituida o por ahora trabajas de manera independiente?"
 ` : ''}
 
 ${momentoActual === 4 ? `
 MOMENTO 4 — PRESENTAR PROGRAMA COMPLETO:
-OBLIGATORIO: Copia el PASO 3 del vendedor COMPLETO, palabra por palabra, sin resumir, sin acortar.
-Estructura exacta:
+OBLIGATORIO: Copia el PASO 3 del vendedor COMPLETO, palabra por palabra, sin resumir ni acortar.
 1. Primero: "Mira ${nombre}, justamente tenemos un programa diseñado para personas en tu situación. Te cuento:"
-2. Luego: copia el PASO 3 COMPLETO tal como está en PASOS_DEL_VENDEDOR
+2. Copia el PASO 3 COMPLETO
 3. Al final: "¿Qué te parece ${nombre}? ¿Tienes alguna duda o consulta?"
 ` : ''}
 
 ${momentoActual === 5 ? `
 MOMENTO 5 — COORDINAR LLAMADA:
-Consigue el horario para la llamada del vendedor.
-Mensaje: "Para que nuestro asesor te explique todo con calma y resuelva tus dudas sobre ${producto}, ¿a qué hora te viene mejor una llamada ${nombre}? ¿Hoy o mañana?"
+Tu ÚNICA tarea es conseguir el horario.
+Mensaje: "Para que puedas hablar directamente conmigo y resolver todas tus dudas sobre ${producto}, ¿a qué hora te viene mejor una llamada ${nombre}? ¿Hoy o mañana?"
+accion DEBE ser NINGUNA.
 ` : ''}
 
 ${momentoActual === 6 ? `
 MOMENTO 6 — CIERRE CÁLIDO:
-El lead ya confirmó su horario. Cierra la conversación calurosamente.
-Mensaje: "Perfecto ${nombre} 😊 Le paso tu información al asesor ahora mismo. Te contactarán a la hora que indicaste. Cualquier duda mientras tanto, aquí estoy 👋"
-OBLIGATORIO: accion DEBE ser NOTIFICAR_VENDEDOR — no puede ser NINGUNA.
+El lead confirmó horario. Cierra con anticipación positiva.
+Mensaje: "Perfecto ${nombre} 😊 Ya tengo todo anotado. Te llamo a la hora que me indicaste para hablar sobre tu proyecto de exportar ${producto}. ¡Nos hablamos pronto! 👋"
+accion DEBE ser NOTIFICAR_VENDEDOR.
 ` : ''}
 `
 
@@ -225,7 +237,7 @@ CONTEXTO TÉCNICO (nunca lo menciones al lead):
 - Estado conversación: ${convState}
 - Bot ya habló: ${botYaHablo}
 - Recibió imagen: ${esImagen}
-${botYaHablo ? '- CRÍTICO: Ya te presentaste. NO vuelvas a saludar.' : ''}
+${botYaHablo ? `- CRÍTICO: Ya te presentaste como ${nombreVendedor}. NO vuelvas a saludar.` : ''}
 
 ${instruccionMomento}
 
@@ -236,7 +248,7 @@ Primer carácter { — Último carácter }
 
 {
   "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|SOLICITA_LLAMADA|REACTIVACION|IMAGEN_PRODUCTO|COMPROBANTE|DESVIO|PREGUNTA_INFO",
-  "respuesta": "texto que se envía al lead como Jhon humano",
+  "respuesta": "texto que se envía al lead como ${nombreVendedor} humano",
   "accion": "NINGUNA|CERRAR_LEAD|PEDIR_COMPROBANTE|NOTIFICAR_VENDEDOR|CAMBIAR_ESTADO_PAYMENT",
   "pasoActual": ${momentoActual},
   "datosExtraidos": {
@@ -329,9 +341,9 @@ async function actualizarPerfil(leadId, datosExtraidos) {
 }
 
 // ════════════════════════════════════════════════════════════
-// ACTION EXECUTOR
+// ACTION EXECUTOR — briefing rico con deep link personalizado
 // ════════════════════════════════════════════════════════════
-async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) {
+async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, cam }) {
   try {
     switch (accion) {
 
@@ -349,19 +361,35 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto }) 
 
       case 'NOTIFICAR_VENDEDOR':
         if (vendor?.whatsappNumber) {
-          const nombre   = lead.nombreDetectado  || 'Sin nombre'
-          const producto = lead.productoDetectado || 'Sin producto'
-          const score    = lead.perfilScore       || 0
-          const emoji    = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
+          const nombre    = lead.nombreDetectado  || 'Sin nombre'
+          const producto  = lead.productoDetectado || 'Sin producto'
+          const score     = lead.perfilScore       || 0
+          const emoji     = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
+          const horario   = extraerHorario(texto) || 'el horario acordado'
+          const campNombre = cam?.nombre || 'MPX'
+
+          // Deep link con mensaje de CONFIRMACIÓN — no de presentación
+          // El lead ya conoce al vendedor por nombre — coherencia total
+          const msgDeepLink = encodeURIComponent(
+            `Hola ${nombre} 👋 Soy ${vendor.nombre} de Peru Exporta TV. Ya tengo todo listo para llamarte ${horario} y hablar sobre tu proyecto de exportar ${producto}. ¡Te espero! 😊`
+          )
+
           const briefing =
 `${emoji} LEAD LISTO PARA LLAMADA
 
-📱 wa.me/${lead.telefono}
+https://wa.me/${lead.telefono}?text=${msgDeepLink}
+
+━━━━━━━━━━━━━━━━━━━━━
 👤 ${nombre}
 📦 ${producto}
-💬 "${texto?.slice(0, 100)}"
+🕐 Llamar: ${horario}
+📚 ${campNombre}
+━━━━━━━━━━━━━━━━━━━━━
+💬 Último mensaje:
+"${texto?.slice(0, 100)}"
 
 ⚡ ${score >= 7 ? 'Llama AHORA — alta prioridad' : 'Llama hoy'}`
+
           await enviarTexto(instancia, vendor.whatsappNumber, briefing).catch(() => {})
         }
         await prisma.conversation.update({
@@ -409,6 +437,9 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       console.error(`[Motor] Vendor no encontrado: ${instancia}`)
       return
     }
+
+    // Nombre real del vendedor — el bot se llama igual
+    const nombreVendedor = vendor.nombre
 
     const lead = await prisma.lead.findUnique({ where: { telefono } })
 
@@ -506,15 +537,18 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           botPrompt:      cam?.botPrompt     || null,
           campaignNombre: cam?.nombre        || 'Peru Exporta TV',
           pasosVendedor,
-          momentoActual
+          momentoActual,
+          nombreVendedor: vendorActivo.nombre
         })
 
         const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
 
-        // Forzar acción correcta en Momento 6
+        // ── ACCIÓN FINAL — código fuerza la acción correcta ──
         const accionFinal = momentoActual === 6
           ? 'NOTIFICAR_VENDEDOR'
-          : (resultado?.accion || 'NINGUNA')
+          : momentoActual === 5
+            ? 'NINGUNA'
+            : (resultado?.accion || 'NINGUNA')
 
         if (conv?.id) {
           await prisma.conversation.update({
@@ -544,7 +578,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
             lead, conv,
             instancia: instanciaActiva,
             vendor:    vendorActivo,
-            texto:     mensaje
+            texto:     mensaje,
+            cam
           })
         }
 
@@ -596,11 +631,11 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     const msgBienvenida = paso1?.mensaje
       ? interp(paso1.mensaje, {
           telefono,
-          vendedor: vendor?.nombre   || '',
+          vendedor: nombreVendedor,
           curso:    campaign?.nombre || '',
           nombre:   ''
         })
-      : `Hola 👋 Soy Jhon, asesor de Peru Exporta TV 😊\n\n¿Cómo te llamas y qué producto tienes en mente para exportar?`
+      : `Hola 👋 Soy ${nombreVendedor}, asesor de Peru Exporta TV 😊\n\n¿Cómo te llamas y qué producto tienes en mente para exportar?`
 
     await sleep(1000)
     await enviarTexto(instancia, telefono, msgBienvenida)
@@ -616,7 +651,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       })
     }
 
-    console.log(`[Motor] Lead nuevo: ${telefono} | vendor: ${vendor.nombre} | campaign: ${campaign?.slug || 'sin campaña'}`)
+    console.log(`[Motor] Lead nuevo: ${telefono} | vendor: ${nombreVendedor} | campaign: ${campaign?.slug || 'sin campaña'}`)
 
   } catch (err) {
     console.error('[Motor] Error crítico:', err.message)
