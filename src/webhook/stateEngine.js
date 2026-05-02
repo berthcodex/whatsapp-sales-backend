@@ -236,16 +236,10 @@ accion DEBE ser NINGUNA.
 ${momentoActual === 6 ? `
 MOMENTO 6 — CIERRE CON PREGUNTA ABIERTA:
 El lead confirmó horario. Dos partes obligatorias:
-1. Confirma el horario exacto que dijo el lead en su último mensaje.
-   Formato: "Listo ${nombre} 😊 [horario exacto] te llamo para hablar de tu ${producto}."
-2. Agrega UNA pregunta abierta RELEVANTE al perfil del lead.
-   La pregunta debe ser específica — no genérica.
-   Objetivo: mantener al lead caliente y sacar más contexto para la llamada.
-   Ejemplos según perfil:
-   - Lead sin empresa: "¿Ya sabes si tienes o puedes conseguir RUC para exportar?"
-   - Lead con café: "¿Ya tienes idea de a qué país te gustaría exportar primero?"
-   - Lead primera vez: "¿Tienes alguna duda puntual que quieras que revisemos en la llamada?"
-   - Lead con producto agrícola: "¿Sabes aproximadamente cuánto volumen podrías manejar al mes?"
+1. Confirma el horario exacto: "Listo ${nombre} 😊 [horario exacto] te llamo para hablar de tu ${producto}."
+2. Agrega SIEMPRE esta pregunta exacta: "¿Ya tienes en mente a qué país te gustaría exportar tu ${producto}? 🌍"
+   Esta pregunta va SIEMPRE — es universal para cualquier perfil.
+   NUNCA uses preguntas sobre RUC, empresa, requisitos ni documentos.
 accion DEBE ser NOTIFICAR_VENDEDOR.
 ` : ''}
 
