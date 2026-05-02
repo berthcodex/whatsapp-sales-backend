@@ -1,4 +1,5 @@
-// src/motor/followupEngine.js — v2 HIDATA 200X
+// src/motor/followupEngine.js — v3 HIDATA 111X
+// Fix v3: guard post-notificación — no reactivar si lead respondió después de NOTIFIED
 // Idempotente por diseño — no importa cuántos crons lleguen simultáneos
 // Lock optimista mejorado con ventana de 30 segundos
 // Vendor briefing completo con score y tip de cierre
@@ -9,7 +10,7 @@ import prisma from '../db/prisma.js'
 const SEG_SILENCIO       = 20
 const MAX_REACTIVACIONES = 3
 const MIN_ENTRE_REACTIVA = 30
-const LOCK_WINDOW_MS     = 30000  // 30s — ventana de lock ampliada vs 10s anterior
+const LOCK_WINDOW_MS     = 30000
 
 // ════════════════════════════════════════════════════════════
 // HELPERS
@@ -42,8 +43,7 @@ async function enviarVendedor(inst, num, msg) {
 }
 
 // ════════════════════════════════════════════════════════════
-// VENDOR BRIEFING — ficha completa YC-level
-// El vendedor recibe todo lo que necesita para cerrar en 5 min
+// VENDOR BRIEFING
 // ════════════════════════════════════════════════════════════
 async function construirBriefing(conv) {
   const historial = await prisma.message.findMany({
@@ -68,12 +68,14 @@ async function construirBriefing(conv) {
 
   return `${emoji} LEAD CALIFICADO — SCORE ${score}/10
 
-📱 wa.me/${conv.lead.telefono}
+https://wa.me/${conv.lead.telefono}
+
+━━━━━━━━━━━━━━━━━━━━━
 👤 ${nombre}
 📦 ${producto}
-📊 ${score >= 7 ? 'ALTA PRIORIDAD' : score >= 4 ? 'MEDIA' : 'BAJA'}
 📚 ${conv.campaign?.nombre || 'orgánico'}
-
+📊 ${score >= 7 ? 'ALTA PRIORIDAD' : score >= 4 ? 'MEDIA' : 'BAJA'}
+━━━━━━━━━━━━━━━━━━━━━
 💬 Dijo:
 ${historialTexto}
 
@@ -83,9 +85,7 @@ ${historialTexto}
 }
 
 // ════════════════════════════════════════════════════════════
-// LOCK OPTIMISTA MEJORADO
-// Ventana de 30s — cubre el peor caso de 3 crons simultáneos
-// Idempotente — si el lock falla, skip silencioso
+// LOCK OPTIMISTA
 // ════════════════════════════════════════════════════════════
 async function intentarLock(convId, ahora) {
   const locked = await prisma.conversation.updateMany({
@@ -102,11 +102,9 @@ async function intentarLock(convId, ahora) {
 }
 
 // ════════════════════════════════════════════════════════════
-// ENTRY POINT — llamado desde el cron endpoint
-// prisma se recibe como parámetro para compatibilidad con routes
+// ENTRY POINT
 // ════════════════════════════════════════════════════════════
 export async function ejecutarFollowup(prismaParam) {
-  // Usar prisma importado directamente — prismaParam es legacy
   const ahora = new Date()
   let procesados = 0
 
@@ -128,11 +126,9 @@ export async function ejecutarFollowup(prismaParam) {
 
   for (const conv of convsActivas) {
     try {
-      // LOCK OPTIMISTA — ventana 30s
       const locked = await intentarLock(conv.id, ahora)
       if (!locked) continue
 
-      // GUARD — solo si lead respondió DESPUÉS del bot
       if (conv.lastBotMessageAt && conv.lastLeadMessageAt) {
         const botTs  = new Date(conv.lastBotMessageAt).getTime()
         const leadTs = new Date(conv.lastLeadMessageAt).getTime()
@@ -151,9 +147,9 @@ export async function ejecutarFollowup(prismaParam) {
         curso:    conv.campaign?.nombre       || 'Mi Primera Exportación'
       }
 
-      const steps    = conv.campaign?.steps || []
+      const steps      = conv.campaign?.steps || []
       const pasoActual = conv.currentStep || 0
-      const pasosSig = steps.filter(s => s.orden > pasoActual)
+      const pasosSig   = steps.filter(s => s.orden > pasoActual)
 
       let proximoMSG = null
       const notifys  = []
@@ -162,7 +158,6 @@ export async function ejecutarFollowup(prismaParam) {
         if (paso.tipo === 'MSG' && !proximoMSG) { proximoMSG = paso; break }
       }
 
-      // ── Hay próximo MSG → avanzar paso ──────────────────
       if (proximoMSG) {
         for (const n of notifys) {
           if (conv.vendor?.whatsappNumber)
@@ -184,7 +179,6 @@ export async function ejecutarFollowup(prismaParam) {
         continue
       }
 
-      // ── Sin más pasos → briefing al vendedor → NOTIFIED ──
       if (conv.vendorNotificationCount === 0) {
         const briefing = await construirBriefing(conv)
         if (conv.vendor?.whatsappNumber) {
@@ -244,7 +238,6 @@ export async function ejecutarFollowup(prismaParam) {
       )
       if (!followup) continue
 
-      // Lock para followup steps
       const locked = await intentarLock(conv.id, ahora)
       if (!locked) continue
 
@@ -294,6 +287,16 @@ export async function ejecutarFollowup(prismaParam) {
       const instancia = conv.vendor?.instanciaEvolution
       if (!instancia) continue
 
+      // ── GUARD: lead respondió después de NOTIFIED — no reactivar ──
+      if (conv.lastLeadMessageAt && conv.vendorNotifiedAt) {
+        const leadTs  = new Date(conv.lastLeadMessageAt).getTime()
+        const notifTs = new Date(conv.vendorNotifiedAt).getTime()
+        if (leadTs > notifTs) {
+          console.log(`[Followup] Lead respondió post-notificación — skip: ${conv.lead.telefono}`)
+          continue
+        }
+      }
+
       const locked = await intentarLock(conv.id, ahora)
       if (!locked) continue
 
@@ -322,17 +325,17 @@ export async function ejecutarFollowup(prismaParam) {
 
       if (minutos >= 1440 && reactCount === 0) {
         msg    = `¡Hola! 👋 Tenemos nuevas fechas disponibles.\n\n¿Sigues interesado/a? 😊`
-        alertV = `🔄 Lead reactivado +24h\n📱 wa.me/${conv.lead.telefono}`
+        alertV = `🔄 Lead reactivado +24h\n\nhttps://wa.me/${conv.lead.telefono}`
       } else if (minutos >= 120 && minutos < 180 && reactCount === 0) {
         msg    = `Hola! 🙏 Lamentamos la espera. Ya escalé tu caso.\n\nUn asesor te llama hoy. ¿A qué hora? 👇`
-        alertV = `⚠️ URGENTE — 2h esperando\n📱 wa.me/${conv.lead.telefono}`
+        alertV = `⚠️ URGENTE — 2h esperando\n\nhttps://wa.me/${conv.lead.telefono}`
       } else if (minutos >= 60 && minutos < 65 && reactCount === 0) {
         msg    = `Hola! 😊 Ya le recordé a tu asesor — te contacta hoy.\n\n¿A qué hora? 👇`
-        alertV = `📌 1h esperando\n📱 wa.me/${conv.lead.telefono}`
+        alertV = `📌 1h esperando\n\nhttps://wa.me/${conv.lead.telefono}`
       } else if (minutos >= 30 && minutos < 35 && reactCount === 0) {
         if (conv.vendor?.whatsappNumber)
           await enviarVendedor(instancia, conv.vendor.whatsappNumber,
-            `🔔 Lead 30min esperando\n📱 wa.me/${conv.lead.telefono}`)
+            `🔔 Lead 30min esperando\n\nhttps://wa.me/${conv.lead.telefono}`)
         await prisma.conversation.update({
           where: { id: conv.id },
           data: { reactivationCount: reactCount + 1, lastReactivationAt: new Date() }
