@@ -1,7 +1,9 @@
-// src/webhook/stateEngine.js — v12 HIDATA 111X
-// Fix v12: Momento 5 mensaje directo y humano — "¿A qué hora te viene mejor que te llame?"
-// Fix v11: bot usa nombre real del vendedor — cero confusión de identidad
-// Fix v11: briefing rico con deep link personalizado
+// src/webhook/stateEngine.js — v13 HIDATA 111X
+// Momento 7 — post cierre, conversación caliente
+// Momento 6 — pregunta abierta generada por Groq
+// Briefing sin mensaje predeterminado — link limpio
+// convStateParaGroq — override para Momento 7
+// accionFinal — Momento 7 nunca notifica salvo CERRAR o COMPROBANTE
 // Código controla el flujo. Groq ejecuta. Nunca al revés.
 
 import prisma from '../db/prisma.js'
@@ -82,6 +84,15 @@ function detectarMomento(lead, historial) {
   const botMensajes  = historial.filter(m => m.origen === 'BOT').map(m => m.texto.toLowerCase())
   const leadMensajes = historial.filter(m => m.origen === 'LEAD').map(m => m.texto.toLowerCase())
 
+  // ── Momento 7 — bot ya hizo cierre, lead sigue escribiendo ─
+  const yaHizoCierre = botMensajes.some(m =>
+    m.includes('nos hablamos') ||
+    m.includes('te llamo') && m.includes('anotado') ||
+    m.includes('hablamos pronto')
+  )
+  if (yaHizoCierre) return 7
+
+  // ── Detectar si ya presentamos el programa ───────────────
   const yaPresento = botMensajes.some(m =>
     m.includes('exporta con 1,000') ||
     m.includes('curso taller') ||
@@ -89,6 +100,7 @@ function detectarMomento(lead, historial) {
     m.includes('inscripcion anticipada')
   )
 
+  // ── Detectar si ya preguntamos horario ───────────────────
   const yaPreguntoHorario = botMensajes.some(m =>
     m.includes('qué hora te viene mejor que te llame') ||
     m.includes('que hora te viene mejor que te llame') ||
@@ -147,7 +159,7 @@ function detectarMomento(lead, historial) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v12
+// GROQ BRAIN v13
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({
   historial, textoActual, esImagen, convState,
@@ -181,12 +193,15 @@ ${pasosVendedor
     const nombre   = perfilActual.nombre  || ''
     const producto = perfilActual.producto || ''
 
+    // Override convState para Momento 7 — Groq sabe que está post-cierre
+    const convStateParaGroq = momentoActual === 7 ? 'POST_CIERRE' : convState
+
     const instruccionMomento = `
 ════════════════════════════════════════
 INSTRUCCIÓN DEL SISTEMA — OBLIGATORIA
 ════════════════════════════════════════
 El sistema detectó MOMENTO ${momentoActual}.
-Tu ÚNICA tarea es ejecutar el MOMENTO ${momentoActual}. No puedes hacer otra cosa.
+Tu ÚNICA tarea es ejecutar el MOMENTO ${momentoActual}.
 
 ${momentoActual === 2 ? `
 MOMENTO 2 — EXPERIENCIA:
@@ -219,10 +234,37 @@ accion DEBE ser NINGUNA.
 ` : ''}
 
 ${momentoActual === 6 ? `
-MOMENTO 6 — CIERRE CÁLIDO:
-El lead confirmó horario. Cierra con anticipación positiva.
-Mensaje: "Perfecto ${nombre} 😊 Ya tengo todo anotado. Te llamo a la hora que me indicaste para hablar sobre tu proyecto de exportar ${producto}. ¡Nos hablamos pronto! 👋"
+MOMENTO 6 — CIERRE CON PREGUNTA ABIERTA:
+El lead confirmó horario. Dos partes obligatorias:
+1. Confirma el horario exacto que dijo el lead en su último mensaje.
+   Formato: "Listo ${nombre} 😊 [horario exacto] te llamo para hablar de tu ${producto}."
+2. Agrega UNA pregunta abierta RELEVANTE al perfil del lead.
+   La pregunta debe ser específica — no genérica.
+   Objetivo: mantener al lead caliente y sacar más contexto para la llamada.
+   Ejemplos según perfil:
+   - Lead sin empresa: "¿Ya sabes si tienes o puedes conseguir RUC para exportar?"
+   - Lead con café: "¿Ya tienes idea de a qué país te gustaría exportar primero?"
+   - Lead primera vez: "¿Tienes alguna duda puntual que quieras que revisemos en la llamada?"
+   - Lead con producto agrícola: "¿Sabes aproximadamente cuánto volumen podrías manejar al mes?"
 accion DEBE ser NOTIFICAR_VENDEDOR.
+` : ''}
+
+${momentoActual === 7 ? `
+MOMENTO 7 — POST CIERRE:
+La cita ya está confirmada. El bot ya se despidió.
+El lead está respondiendo después del cierre — está caliente.
+Tu tarea:
+1. Responde de forma natural, breve y cálida a lo que dice el lead.
+2. Recoge cualquier información nueva en datosExtraidos.
+3. Mantén la conversación caliente hasta la llamada.
+4. Máximo 2 líneas. Un emoji.
+5. NO vuelvas a preguntar el horario.
+6. NO vuelvas a presentar el programa.
+7. NO vuelvas a despedirte.
+accion DEBE ser NINGUNA — salvo que:
+- El lead rechace explícitamente → accion: CERRAR_LEAD
+- El lead declare pago → accion: PEDIR_COMPROBANTE
+- El lead pida cambiar el horario → responde naturalmente y accion: NINGUNA
 ` : ''}
 `
 
@@ -235,7 +277,7 @@ ${pasosCtx}
 
 CONTEXTO TÉCNICO (nunca lo menciones al lead):
 - Perfil: ${JSON.stringify(perfilActual)}
-- Estado conversación: ${convState}
+- Estado conversación: ${convStateParaGroq}
 - Bot ya habló: ${botYaHablo}
 - Recibió imagen: ${esImagen}
 ${botYaHablo ? `- CRÍTICO: Ya te presentaste como ${nombreVendedor}. NO vuelvas a saludar.` : ''}
@@ -342,7 +384,7 @@ async function actualizarPerfil(leadId, datosExtraidos) {
 }
 
 // ════════════════════════════════════════════════════════════
-// ACTION EXECUTOR — briefing rico con deep link personalizado
+// ACTION EXECUTOR — briefing limpio sin mensaje predeterminado
 // ════════════════════════════════════════════════════════════
 async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, cam }) {
   try {
@@ -366,17 +408,15 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, ca
           const producto   = lead.productoDetectado || 'Sin producto'
           const score      = lead.perfilScore       || 0
           const emoji      = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
-          const horario    = extraerHorario(texto)  || 'el horario acordado'
+          const horario    = extraerHorario(texto)  || 'horario por confirmar'
           const campNombre = cam?.nombre            || 'MPX'
 
-          const msgDeepLink = encodeURIComponent(
-            `Hola ${nombre} 👋 Soy ${vendor.nombre} de Peru Exporta TV. Ya tengo todo listo para llamarte ${horario} y hablar sobre tu proyecto de exportar ${producto}. ¡Te espero! 😊`
-          )
-
+          // Link limpio — sin mensaje predeterminado
+          // El vendedor escribe lo que él considere apropiado
           const briefing =
 `${emoji} LEAD LISTO PARA LLAMADA
 
-https://wa.me/${lead.telefono}?text=${msgDeepLink}
+https://wa.me/${lead.telefono}
 
 ━━━━━━━━━━━━━━━━━━━━━
 👤 ${nombre}
@@ -509,9 +549,11 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           pasoActual: lead.pasoActual        || 1
         }
 
+        // ── CÓDIGO DETECTA EL MOMENTO ────────────────────────
         const momentoActual = detectarMomento(lead, historial)
         console.log(`[Flujo] Momento detectado: ${momentoActual} | nombre:${perfilActual.nombre} | producto:${perfilActual.producto}`)
 
+        // ── Campaña + pasos del vendedor ─────────────────────
         const cam = lead.campaignId
           ? await prisma.campaign.findUnique({
               where: { id: lead.campaignId },
@@ -521,6 +563,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
         const pasosVendedor = cam?.steps || []
 
+        // ── GROQ — ejecuta el momento que el código decidió ──
         const resultado = await consultarGroq({
           historial,
           textoActual:    mensaje,
@@ -536,11 +579,21 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
         const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
 
-        const accionFinal = momentoActual === 6
-          ? 'NOTIFICAR_VENDEDOR'
-          : momentoActual === 5
-            ? 'NINGUNA'
-            : (resultado?.accion || 'NINGUNA')
+        // ── ACCIÓN FINAL — código fuerza la acción correcta ──
+        // Momento 6 → siempre NOTIFICAR_VENDEDOR
+        // Momento 5 → siempre NINGUNA
+        // Momento 7 → solo CERRAR_LEAD o PEDIR_COMPROBANTE si Groq lo decide
+        //             nunca NOTIFICAR_VENDEDOR
+        // Otros → Groq decide
+        const accionFinal = (() => {
+          if (momentoActual === 6) return 'NOTIFICAR_VENDEDOR'
+          if (momentoActual === 5) return 'NINGUNA'
+          if (momentoActual === 7) {
+            const accion = resultado?.accion || 'NINGUNA'
+            return accion === 'NOTIFICAR_VENDEDOR' ? 'NINGUNA' : accion
+          }
+          return resultado?.accion || 'NINGUNA'
+        })()
 
         if (conv?.id) {
           await prisma.conversation.update({
@@ -585,7 +638,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     }
 
     // ════════════════════════════════════════════════════════
-    // LEAD NUEVO
+    // LEAD NUEVO — Router inteligente 2 capas
     // ════════════════════════════════════════════════════════
     const campaign = await resolverCampaign(mensaje, prisma)
 
