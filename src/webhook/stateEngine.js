@@ -150,7 +150,7 @@ El primer carácter debe ser { y el último }.
       },
       body: JSON.stringify({
         model: 'llama-3.3-70b-versatile',
-        max_tokens: 600,
+        max_tokens: 1200,
         temperature: 0.3,
         messages: [
           { role: 'system', content: systemPrompt },
