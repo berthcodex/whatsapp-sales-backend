@@ -1,7 +1,7 @@
-// src/webhook/stateEngine.js — v7 HIDATA 111X
-// Vendor Intelligence Layer — flow_steps del vendedor pasados a Groq
-// Groq potencia los mensajes del vendedor con contexto del lead
-// El vendedor controla el guión. Groq lo ejecuta con inteligencia.
+// src/webhook/stateEngine.js — v8 HIDATA 111X
+// Arquitectura: Handler → Brain → ActionExecutor → ProfileBuilder
+// NUEVO: Código controla el flujo. Groq ejecuta. Nunca al revés.
+// El momento actual lo decide el código, no Groq.
 // Multi-vendor ready + Guard de propiedad de leads
 // Router inteligente 2 capas — Groq como autoridad única
 // Redis lock — anti doble respuesta
@@ -60,13 +60,68 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v7 — Vendor Intelligence Layer
-// Recibe flow_steps del vendedor + botPrompt + contexto del lead
-// Groq potencia los mensajes del vendedor con inteligencia
+// DETECTOR DE MOMENTO — el código decide, no Groq
+// Basado en datos reales del lead en BD
+// ════════════════════════════════════════════════════════════
+function detectarMomento(lead, historial) {
+  const nombre   = lead.nombreDetectado
+  const producto = lead.productoDetectado
+
+  // Sin nombre ni producto → Momento 2 (experiencia)
+  if (!nombre && !producto) return 2
+
+  // Buscar en historial si ya preguntamos empresa
+  const botMensajes = historial.filter(m => m.origen === 'BOT').map(m => m.texto)
+  const leadMensajes = historial.filter(m => m.origen === 'LEAD').map(m => m.texto.toLowerCase())
+
+  const yaPreguntoEmpresa = botMensajes.some(m =>
+    m.toLowerCase().includes('empresa constituida') ||
+    m.toLowerCase().includes('independiente')
+  )
+
+  const leadRespondioEmpresa = yaPreguntoEmpresa && leadMensajes.some(m =>
+    m.includes('empresa') || m.includes('independiente') ||
+    m.includes('negocio') || m.includes('ruc') ||
+    m.includes('constituida') || m.includes('natural') ||
+    m.includes('persona') || m.includes('no tengo') ||
+    m.includes('trabajo') || m.includes('casa')
+  )
+
+  // Buscar si ya preguntamos experiencia
+  const yaPreguntoExperiencia = botMensajes.some(m =>
+    m.toLowerCase().includes('experiencia exportando') ||
+    m.toLowerCase().includes('empezando desde cero')
+  )
+
+  const leadRespondioExperiencia = yaPreguntoExperiencia && leadMensajes.some(m =>
+    m.includes('primera') || m.includes('nunca') ||
+    m.includes('experiencia') || m.includes('exportado') ||
+    m.includes('cero') || m.includes('antes') ||
+    m.includes('si') || m.includes('sí')
+  )
+
+  // Buscar si ya presentamos el programa
+  const yaPresento = botMensajes.some(m =>
+    m.toLowerCase().includes('exporta con 1,000') ||
+    m.toLowerCase().includes('curso taller') ||
+    m.toLowerCase().includes('inscripción anticipada')
+  )
+
+  if (yaPresento) return 5  // Momento 5 — coordinar llamada
+  if (leadRespondioEmpresa) return 4  // Momento 4 — presentar programa
+  if (yaPreguntoEmpresa && !leadRespondioEmpresa) return 3  // Esperando respuesta empresa
+  if (leadRespondioExperiencia) return 3  // Momento 3 — preguntar empresa
+  if (yaPreguntoExperiencia) return 2  // Esperando respuesta experiencia
+  return 2  // Default — preguntar experiencia
+}
+
+// ════════════════════════════════════════════════════════════
+// GROQ BRAIN v8 — Código controla el flujo. Groq ejecuta.
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({
   historial, textoActual, esImagen, convState,
-  perfilActual, botPrompt, campaignNombre, pasosVendedor
+  perfilActual, botPrompt, campaignNombre,
+  pasosVendedor, momentoActual
 }) {
   try {
     if (!process.env.GROQ_API_KEY) return null
@@ -78,48 +133,62 @@ Tu misión es calificar al lead, no venderle. El cierre es por teléfono.
 Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
 Nunca reveles que eres IA.`
 
-    // Construir contexto de pasos del vendedor
+    // Pasos del vendedor como contexto
     const pasosCtx = pasosVendedor?.length
       ? `
 ════════════════════════════════════════
 PASOS_DEL_VENDEDOR — CONTENIDO EXACTO
-Estos son los mensajes que el vendedor escribió para cada momento.
-Úsalos como base. Potencialos con el contexto del lead.
-NUNCA los ignores. NUNCA los reordenes.
 ════════════════════════════════════════
 ${pasosVendedor
   .filter(p => p.tipo === 'MSG')
-  .map((p, i) => `PASO ${p.orden}:\n${p.mensaje}`)
+  .map(p => `PASO ${p.orden}:\n${p.mensaje}`)
   .join('\n\n---\n\n')}
 `
       : ''
 
+    // Instrucción de momento — el código manda
+    const instruccionMomento = `
+════════════════════════════════════════
+INSTRUCCIÓN DEL SISTEMA — OBLIGATORIA
+════════════════════════════════════════
+El sistema detectó que estamos en el MOMENTO ${momentoActual}.
+Tu ÚNICA tarea en esta respuesta es ejecutar el MOMENTO ${momentoActual}.
+NO puedes avanzar a otro momento. NO puedes saltarte este momento.
+El código ya verificó que este es el momento correcto.
+
+${momentoActual === 2 ? `MOMENTO 2: Pregunta experiencia exportando. Usa el PASO 2 del vendedor como base. Potencialo con nombre="${perfilActual.nombre || ''}" y producto="${perfilActual.producto || ''}".` : ''}
+${momentoActual === 3 ? `MOMENTO 3: Pregunta si tiene empresa constituida o trabaja independiente. Mensaje natural: "Entiendo 😊 Y cuéntame ${perfilActual.nombre || ''}, ¿tienes empresa constituida o por ahora trabajas de manera independiente?"` : ''}
+${momentoActual === 4 ? `MOMENTO 4: Presenta el programa COMPLETO. COPIA el PASO 3 del vendedor PALABRA POR PALABRA sin resumir ni acortar. Antes agrega "Mira ${perfilActual.nombre || ''}, justamente tenemos un programa diseñado para personas en tu situación. Te cuento:" y después agrega "¿Qué te parece ${perfilActual.nombre || ''}? ¿Tienes alguna duda o consulta?"` : ''}
+${momentoActual === 5 ? `MOMENTO 5: Consigue el horario para la llamada. "Para que nuestro asesor te explique todo con calma, ¿a qué hora te viene mejor una llamada ${perfilActual.nombre || ''}? ¿Hoy o mañana?"` : ''}
+${momentoActual === 6 ? `MOMENTO 6: Cierra calurosamente. "Perfecto ${perfilActual.nombre || ''} 😊 Le paso tu información al asesor ahora mismo. Te contactarán a la hora acordada. Cualquier duda aquí estoy 👋" → accion: NOTIFICAR_VENDEDOR` : ''}
+`
+
     const botYaHablo = historial.some(m => m.origen === 'BOT')
-    const mensajesBot = historial.filter(m => m.origen === 'BOT').length
 
     const systemPrompt =
 `${promptBase}
 
 ${pasosCtx}
 
-CONTEXTO TÉCNICO DEL LEAD (nunca lo menciones al lead):
-- Estado de la conversación: ${convState}
-- Perfil recopilado: ${JSON.stringify(perfilActual)}
-- Mensajes del bot enviados: ${mensajesBot}
+CONTEXTO TÉCNICO (nunca lo menciones al lead):
+- Perfil: ${JSON.stringify(perfilActual)}
+- Estado conversación: ${convState}
+- Bot ya habló: ${botYaHablo}
 - Recibió imagen: ${esImagen}
-${botYaHablo ? '- CRÍTICO: Ya te presentaste. NO vuelvas a saludar ni a presentarte.' : ''}
+${botYaHablo ? '- CRÍTICO: Ya te presentaste. NO vuelvas a saludar.' : ''}
+
+${instruccionMomento}
 
 INSTRUCCIÓN CRÍTICA DE FORMATO:
-Tu respuesta COMPLETA debe ser ÚNICAMENTE el objeto JSON.
-NO escribas nada antes del JSON.
-NO escribas nada después del JSON.
-El primer carácter debe ser { y el último }.
+Tu respuesta COMPLETA debe ser ÚNICAMENTE JSON válido.
+Sin texto antes. Sin texto después. Sin markdown. Sin backticks.
+Primer carácter { — Último carácter }
 
 {
   "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|SOLICITA_LLAMADA|REACTIVACION|IMAGEN_PRODUCTO|COMPROBANTE|DESVIO|PREGUNTA_INFO",
   "respuesta": "texto que se envía al lead como Jhon humano",
   "accion": "NINGUNA|CERRAR_LEAD|PEDIR_COMPROBANTE|NOTIFICAR_VENDEDOR|CAMBIAR_ESTADO_PAYMENT",
-  "pasoActual": 1,
+  "pasoActual": ${momentoActual},
   "datosExtraidos": {
     "nombre": null,
     "edad": null,
@@ -183,7 +252,8 @@ El primer carácter debe ser { y el último }.
         respuesta: contenido,
         accion: 'NINGUNA',
         datosExtraidos: {},
-        perfilScore: 0
+        perfilScore: 0,
+        pasoActual: momentoActual
       }
     }
 
@@ -349,18 +419,22 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           return
         }
 
-        const perfilActual = {
-          nombre:        lead.nombreDetectado   || null,
-          producto:      lead.productoDetectado || null,
-          estado:        lead.estado            || null,
-          pasoActual:    lead.pasoActual        || 1
-        }
-
         const historial = await prisma.message.findMany({
           where: { leadId: lead.id },
           orderBy: { createdAt: 'asc' },
           take: 15
         })
+
+        const perfilActual = {
+          nombre:     lead.nombreDetectado   || null,
+          producto:   lead.productoDetectado || null,
+          estado:     lead.estado            || null,
+          pasoActual: lead.pasoActual        || 1
+        }
+
+        // ── CÓDIGO DETECTA EL MOMENTO — no Groq ─────────────
+        const momentoActual = detectarMomento(lead, historial)
+        console.log(`[Flujo] Momento detectado: ${momentoActual} | nombre:${perfilActual.nombre} | producto:${perfilActual.producto}`)
 
         // ── Campaña + pasos del vendedor ─────────────────────
         const cam = lead.campaignId
@@ -372,7 +446,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
         const pasosVendedor = cam?.steps || []
 
-        // ── GROQ — Vendor Intelligence Layer ─────────────────
+        // ── GROQ — ejecuta el momento que el código decidió ──
         const resultado = await consultarGroq({
           historial,
           textoActual:    mensaje,
@@ -381,7 +455,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           perfilActual,
           botPrompt:      cam?.botPrompt     || null,
           campaignNombre: cam?.nombre        || 'Peru Exporta TV',
-          pasosVendedor
+          pasosVendedor,
+          momentoActual
         })
 
         const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
@@ -401,8 +476,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           await actualizarPerfil(lead.id, resultado.datosExtraidos)
         }
 
-        // Actualizar paso actual si Groq lo detectó
-        if (resultado?.pasoActual && resultado.pasoActual !== lead.pasoActual) {
+        if (resultado?.pasoActual) {
           await prisma.lead.update({
             where: { id: lead.id },
             data: { pasoActual: resultado.pasoActual }
@@ -419,7 +493,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           })
         }
 
-        console.log(`[Brain IA] paso:${resultado?.pasoActual || '?'} → ${resultado?.intencion || 'FLUJO_NORMAL'} | accion: ${resultado?.accion || 'NINGUNA'} | vendor: ${vendorActivo.nombre} | ${telefono}`)
+        console.log(`[Brain IA] momento:${momentoActual} → ${resultado?.intencion || 'FLUJO_NORMAL'} | accion: ${resultado?.accion || 'NINGUNA'} | vendor: ${vendorActivo.nombre} | ${telefono}`)
 
       } finally {
         await liberarLock(telefono)
