@@ -1,7 +1,7 @@
-// src/webhook/stateEngine.js — v11 HIDATA 111X
+// src/webhook/stateEngine.js — v12 HIDATA 111X
+// Fix v12: Momento 5 mensaje directo y humano — "¿A qué hora te viene mejor que te llame?"
 // Fix v11: bot usa nombre real del vendedor — cero confusión de identidad
 // Fix v11: briefing rico con deep link personalizado
-// Fix v11: deep link con mensaje de confirmación — no de presentación
 // Código controla el flujo. Groq ejecuta. Nunca al revés.
 
 import prisma from '../db/prisma.js'
@@ -57,7 +57,7 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
-// EXTRACTOR DE HORARIO — del último mensaje del lead
+// EXTRACTOR DE HORARIO
 // ════════════════════════════════════════════════════════════
 function extraerHorario(texto) {
   if (!texto) return null
@@ -90,8 +90,8 @@ function detectarMomento(lead, historial) {
   )
 
   const yaPreguntoHorario = botMensajes.some(m =>
-    m.includes('qué hora') ||
-    m.includes('que hora') ||
+    m.includes('qué hora te viene mejor que te llame') ||
+    m.includes('que hora te viene mejor que te llame') ||
     m.includes('hoy o mañana') ||
     m.includes('hoy o manana')
   )
@@ -147,7 +147,7 @@ function detectarMomento(lead, historial) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v11
+// GROQ BRAIN v12
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({
   historial, textoActual, esImagen, convState,
@@ -213,7 +213,8 @@ OBLIGATORIO: Copia el PASO 3 del vendedor COMPLETO, palabra por palabra, sin res
 ${momentoActual === 5 ? `
 MOMENTO 5 — COORDINAR LLAMADA:
 Tu ÚNICA tarea es conseguir el horario.
-Mensaje: "Para que puedas hablar directamente conmigo y resolver todas tus dudas sobre ${producto}, ¿a qué hora te viene mejor una llamada ${nombre}? ¿Hoy o mañana?"
+Mensaje exacto: "¿A qué hora te viene mejor que te llame ${nombre}? ¿Hoy o mañana? 📞"
+NO improvises ni cambies este mensaje.
 accion DEBE ser NINGUNA.
 ` : ''}
 
@@ -361,15 +362,13 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, ca
 
       case 'NOTIFICAR_VENDEDOR':
         if (vendor?.whatsappNumber) {
-          const nombre    = lead.nombreDetectado  || 'Sin nombre'
-          const producto  = lead.productoDetectado || 'Sin producto'
-          const score     = lead.perfilScore       || 0
-          const emoji     = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
-          const horario   = extraerHorario(texto) || 'el horario acordado'
-          const campNombre = cam?.nombre || 'MPX'
+          const nombre     = lead.nombreDetectado  || 'Sin nombre'
+          const producto   = lead.productoDetectado || 'Sin producto'
+          const score      = lead.perfilScore       || 0
+          const emoji      = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
+          const horario    = extraerHorario(texto)  || 'el horario acordado'
+          const campNombre = cam?.nombre            || 'MPX'
 
-          // Deep link con mensaje de CONFIRMACIÓN — no de presentación
-          // El lead ya conoce al vendedor por nombre — coherencia total
           const msgDeepLink = encodeURIComponent(
             `Hola ${nombre} 👋 Soy ${vendor.nombre} de Peru Exporta TV. Ya tengo todo listo para llamarte ${horario} y hablar sobre tu proyecto de exportar ${producto}. ¡Te espero! 😊`
           )
@@ -385,8 +384,7 @@ https://wa.me/${lead.telefono}?text=${msgDeepLink}
 🕐 Llamar: ${horario}
 📚 ${campNombre}
 ━━━━━━━━━━━━━━━━━━━━━
-💬 Último mensaje:
-"${texto?.slice(0, 100)}"
+💬 "${texto?.slice(0, 100)}"
 
 ⚡ ${score >= 7 ? 'Llama AHORA — alta prioridad' : 'Llama hoy'}`
 
@@ -438,9 +436,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       return
     }
 
-    // Nombre real del vendedor — el bot se llama igual
     const nombreVendedor = vendor.nombre
-
     const lead = await prisma.lead.findUnique({ where: { telefono } })
 
     // ════════════════════════════════════════════════════════
@@ -513,11 +509,9 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           pasoActual: lead.pasoActual        || 1
         }
 
-        // ── CÓDIGO DETECTA EL MOMENTO ────────────────────────
         const momentoActual = detectarMomento(lead, historial)
         console.log(`[Flujo] Momento detectado: ${momentoActual} | nombre:${perfilActual.nombre} | producto:${perfilActual.producto}`)
 
-        // ── Campaña + pasos del vendedor ─────────────────────
         const cam = lead.campaignId
           ? await prisma.campaign.findUnique({
               where: { id: lead.campaignId },
@@ -527,7 +521,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
         const pasosVendedor = cam?.steps || []
 
-        // ── GROQ — ejecuta el momento que el código decidió ──
         const resultado = await consultarGroq({
           historial,
           textoActual:    mensaje,
@@ -543,7 +536,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
         const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
 
-        // ── ACCIÓN FINAL — código fuerza la acción correcta ──
         const accionFinal = momentoActual === 6
           ? 'NOTIFICAR_VENDEDOR'
           : momentoActual === 5
@@ -593,7 +585,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     }
 
     // ════════════════════════════════════════════════════════
-    // LEAD NUEVO — Router inteligente 2 capas
+    // LEAD NUEVO
     // ════════════════════════════════════════════════════════
     const campaign = await resolverCampaign(mensaje, prisma)
 
