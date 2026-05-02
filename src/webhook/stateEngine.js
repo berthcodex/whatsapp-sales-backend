@@ -1,10 +1,10 @@
-// src/webhook/stateEngine.js — v13 HIDATA 111X
-// Momento 7 — post cierre, conversación caliente
-// Momento 6 — pregunta abierta generada por Groq
-// Briefing sin mensaje predeterminado — link limpio
-// convStateParaGroq — override para Momento 7
-// accionFinal — Momento 7 nunca notifica salvo CERRAR o COMPROBANTE
-// Código controla el flujo. Groq ejecuta. Nunca al revés.
+// src/webhook/stateEngine.js — v14 HIDATA 111X
+// v14 — Cortocircuito M5/M6: código genera respuesta, Groq no participa
+// Briefing como dosier de inteligencia comercial
+// detectarMomento M7 — detección robusta basada en mensaje real
+// leadConfirmoHorario — patrones estrictos, sin falsos positivos
+// Math.max en pasoActual — Groq no puede hacer regresión
+// take: 20 en historial — contexto más largo para M7
 
 import prisma from '../db/prisma.js'
 import { resolverCampaign } from './routerInteligente.js'
@@ -78,16 +78,40 @@ function extraerHorario(texto) {
 }
 
 // ════════════════════════════════════════════════════════════
+// FECHA LIMA — para briefing
+// ════════════════════════════════════════════════════════════
+function fechaLima() {
+  return new Date().toLocaleString('es-PE', {
+    timeZone: 'America/Lima',
+    day:      '2-digit',
+    month:    '2-digit',
+    year:     'numeric',
+    hour:     '2-digit',
+    minute:   '2-digit'
+  })
+}
+
+function fechaLlamaLima(horarioRaw) {
+  const ahora = new Date().toLocaleDateString('es-PE', {
+    timeZone: 'America/Lima',
+    day:      '2-digit',
+    month:    'long',
+    year:     'numeric'
+  })
+  return `${ahora} · ${horarioRaw}`
+}
+
+// ════════════════════════════════════════════════════════════
 // DETECTOR DE MOMENTO — el código decide, no Groq
 // ════════════════════════════════════════════════════════════
 function detectarMomento(lead, historial) {
   const botMensajes  = historial.filter(m => m.origen === 'BOT').map(m => m.texto.toLowerCase())
   const leadMensajes = historial.filter(m => m.origen === 'LEAD').map(m => m.texto.toLowerCase())
 
-  // ── Momento 7 — bot ya hizo cierre, lead sigue escribiendo ─
+  // ── Momento 7 — bot ya hizo cierre ───────────────────────
   const yaHizoCierre = botMensajes.some(m =>
+    m.includes('te llamo y vemos todo') ||
     m.includes('nos hablamos') ||
-    m.includes('te llamo') && m.includes('anotado') ||
     m.includes('hablamos pronto')
   )
   if (yaHizoCierre) return 7
@@ -102,22 +126,20 @@ function detectarMomento(lead, historial) {
 
   // ── Detectar si ya preguntamos horario ───────────────────
   const yaPreguntoHorario = botMensajes.some(m =>
-    m.includes('qué hora te viene mejor que te llame') ||
-    m.includes('que hora te viene mejor que te llame') ||
-    m.includes('hoy o mañana') ||
-    m.includes('hoy o manana')
+    m.includes('a qué hora te viene mejor') ||
+    m.includes('a que hora te viene mejor')
   )
 
-  const leadConfirmoHorario = yaPreguntoHorario && leadMensajes.some(m =>
-    m.includes('am') || m.includes('pm') ||
-    m.includes('mañana') || m.includes('manana') ||
-    m.includes('hoy') || m.includes('tarde') ||
-    m.includes('noche') || m.includes('mediodía') ||
-    m.includes('mediodia') || m.includes(':') ||
-    /\d+\s*(am|pm|hrs?|horas?)/.test(m) ||
-    /a las \d+/.test(m) ||
-    /\d+:\d+/.test(m)
-  )
+  // ── Lead confirmó horario — patrones estrictos ───────────
+  const leadConfirmoHorario = yaPreguntoHorario && leadMensajes.some(m => {
+    return /\d{1,2}:\d{2}/.test(m)           ||
+           /\d{1,2}\s*(am|pm)/i.test(m)      ||
+           /a las \d+/i.test(m)              ||
+           /(mañana|manana)\s+a/.test(m)     ||
+           /(hoy)\s+a/.test(m)              ||
+           /^(mañana|manana|hoy)$/.test(m.trim()) ||
+           /^(tarde|noche)$/.test(m.trim())
+  })
 
   if (leadConfirmoHorario) return 6
   if (yaPresento)          return 5
@@ -128,12 +150,12 @@ function detectarMomento(lead, historial) {
   )
 
   const leadRespondioEmpresa = yaPreguntoEmpresa && leadMensajes.some(m =>
-    m.includes('empresa') || m.includes('independiente') ||
-    m.includes('negocio') || m.includes('ruc') ||
-    m.includes('constituida') || m.includes('natural') ||
-    m.includes('persona') || m.includes('no tengo') ||
-    m.includes('trabajo') || m.includes('casa') ||
-    m.includes('formal') || m.includes('informal')
+    m.includes('empresa')       || m.includes('independiente') ||
+    m.includes('negocio')       || m.includes('ruc')           ||
+    m.includes('constituida')   || m.includes('natural')       ||
+    m.includes('persona')       || m.includes('no tengo')      ||
+    m.includes('trabajo')       || m.includes('casa')          ||
+    m.includes('formal')        || m.includes('informal')
   )
 
   if (leadRespondioEmpresa) return 4
@@ -145,11 +167,11 @@ function detectarMomento(lead, historial) {
   )
 
   const leadRespondioExperiencia = yaPreguntoExperiencia && leadMensajes.some(m =>
-    m.includes('primera') || m.includes('nunca') ||
-    m.includes('experiencia') || m.includes('exportado') ||
-    m.includes('cero') || m.includes('antes') ||
-    m.includes('años exportando') || m.includes('ya exporto') ||
-    m.includes('ya exporté') || m.includes('sí exporto')
+    m.includes('primera')        || m.includes('nunca')       ||
+    m.includes('experiencia')    || m.includes('exportado')   ||
+    m.includes('cero')           || m.includes('antes')       ||
+    m.includes('años exportando')|| m.includes('ya exporto')  ||
+    m.includes('ya exporté')     || m.includes('sí exporto')
   )
 
   if (leadRespondioExperiencia) return 3
@@ -159,7 +181,26 @@ function detectarMomento(lead, historial) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v13
+// GENERADOR DETERMINÍSTICO — M5 y M6 sin Groq
+// ════════════════════════════════════════════════════════════
+function generarRespuestaDeterministica(momentoActual, nombre, producto, mensajeActual) {
+  const n = nombre   ? ` ${nombre}`  : ''
+  const p = producto || 'tu producto'
+
+  if (momentoActual === 5) {
+    return `¿A qué hora te viene mejor que te llame${n}? ¿Hoy o mañana? 📞`
+  }
+
+  if (momentoActual === 6) {
+    const horario = extraerHorario(mensajeActual) || 'en el horario acordado'
+    return `Listo${n} 😊 ${horario} te llamo y vemos todo juntos. Ah, y cuéntame — ¿a qué país te gustaría llevar tu ${p}? 🌍 Así voy preparado para tu caso.`
+  }
+
+  return null
+}
+
+// ════════════════════════════════════════════════════════════
+// GROQ BRAIN v14
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({
   historial, textoActual, esImagen, convState,
@@ -193,7 +234,6 @@ ${pasosVendedor
     const nombre   = perfilActual.nombre  || ''
     const producto = perfilActual.producto || ''
 
-    // Override convState para Momento 7 — Groq sabe que está post-cierre
     const convStateParaGroq = momentoActual === 7 ? 'POST_CIERRE' : convState
 
     const instruccionMomento = `
@@ -208,7 +248,6 @@ MOMENTO 2 — EXPERIENCIA:
 Pregunta si tiene experiencia exportando.
 Usa el PASO 2 del vendedor como base.
 Potencialo con nombre="${nombre}" y producto="${producto}".
-Ejemplo: "Muchas gracias ${nombre} 😊 El ${producto} tiene bastante potencial afuera. Cuéntame, ¿ya tienes experiencia exportando o estás dando tus primeros pasos?"
 ` : ''}
 
 ${momentoActual === 3 ? `
@@ -225,30 +264,12 @@ OBLIGATORIO: Copia el PASO 3 del vendedor COMPLETO, palabra por palabra, sin res
 3. Al final: "¿Qué te parece ${nombre}? ¿Tienes alguna duda o consulta?"
 ` : ''}
 
-${momentoActual === 5 ? `
-MOMENTO 5 — COORDINAR LLAMADA:
-Tu ÚNICA tarea es conseguir el horario.
-Mensaje exacto: "¿A qué hora te viene mejor que te llame ${nombre}? ¿Hoy o mañana? 📞"
-NO improvises ni cambies este mensaje.
-accion DEBE ser NINGUNA.
-` : ''}
-
-${momentoActual === 6 ? `
-MOMENTO 6 — CIERRE CON PREGUNTA ABIERTA:
-El lead confirmó horario. Dos partes obligatorias:
-1. Confirma el horario exacto: "Listo ${nombre} 😊 [horario exacto] te llamo para hablar de tu ${producto}."
-2. Agrega SIEMPRE esta pregunta exacta: "¿Ya tienes en mente a qué país te gustaría exportar tu ${producto}? 🌍"
-   Esta pregunta va SIEMPRE — es universal para cualquier perfil.
-   NUNCA uses preguntas sobre RUC, empresa, requisitos ni documentos.
-accion DEBE ser NOTIFICAR_VENDEDOR.
-` : ''}
-
 ${momentoActual === 7 ? `
 MOMENTO 7 — POST CIERRE:
 La cita ya está confirmada. El bot ya se despidió.
 El lead está respondiendo después del cierre — está caliente.
 Tu tarea:
-1. Responde de forma natural, breve y cálida a lo que dice el lead.
+1. Responde de forma natural, breve y cálida.
 2. Recoge cualquier información nueva en datosExtraidos.
 3. Mantén la conversación caliente hasta la llamada.
 4. Máximo 2 líneas. Un emoji.
@@ -258,8 +279,15 @@ Tu tarea:
 accion DEBE ser NINGUNA — salvo que:
 - El lead rechace explícitamente → accion: CERRAR_LEAD
 - El lead declare pago → accion: PEDIR_COMPROBANTE
-- El lead pida cambiar el horario → responde naturalmente y accion: NINGUNA
 ` : ''}
+
+ADEMÁS — para TODOS los momentos — extrae en datosExtraidos:
+- inteligenciaComercial: string de 1 línea que describa el perfil del lead
+  Ejemplo: "novato motivado con producto real — tiene el activo, le falta el camino"
+- palancierre: string de 1 línea con la palanca de cierre específica para este lead
+  Ejemplo: "no atacar precio · atacar el costo de cada mes sin exportar"
+- anguloEntrada: string de 1 línea con cómo abrir la llamada
+  Ejemplo: "empieza por su país destino · no por el temario"
 `
 
     const botYaHablo = historial.some(m => m.origen === 'BOT')
@@ -285,7 +313,7 @@ Primer carácter { — Último carácter }
 
 {
   "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|SOLICITA_LLAMADA|REACTIVACION|IMAGEN_PRODUCTO|COMPROBANTE|DESVIO|PREGUNTA_INFO",
-  "respuesta": "texto que se envía al lead como ${nombreVendedor} humano",
+  "respuesta": "texto que se envía al lead",
   "accion": "NINGUNA|CERRAR_LEAD|PEDIR_COMPROBANTE|NOTIFICAR_VENDEDOR|CAMBIAR_ESTADO_PAYMENT",
   "pasoActual": ${momentoActual},
   "datosExtraidos": {
@@ -296,7 +324,10 @@ Primer carácter { — Último carácter }
     "tieneEmpresa": null,
     "horarioLlamada": null,
     "conocePrecio": null,
-    "consultaConOtro": null
+    "consultaConOtro": null,
+    "inteligenciaComercial": null,
+    "palancierre": null,
+    "anguloEntrada": null
   },
   "perfilScore": 0
 }`
@@ -317,8 +348,8 @@ Primer carácter { — Último carácter }
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        max_tokens: 1200,
+        model:       'llama-3.3-70b-versatile',
+        max_tokens:  1200,
         temperature: 0.3,
         messages: [
           { role: 'system', content: systemPrompt },
@@ -334,7 +365,7 @@ Primer carácter { — Último carácter }
       return null
     }
 
-    const data = await response.json()
+    const data     = await response.json()
     const contenido = data.choices[0]?.message?.content?.trim()
 
     const limpio = (() => {
@@ -347,12 +378,12 @@ Primer carácter { — Último carácter }
     } catch {
       console.error('[Brain IA] JSON parse falló:', contenido?.slice(0, 200))
       return {
-        intencion: 'FLUJO_NORMAL',
-        respuesta: contenido,
-        accion: momentoActual === 6 ? 'NOTIFICAR_VENDEDOR' : 'NINGUNA',
-        datosExtraidos: {},
-        perfilScore: 0,
-        pasoActual: momentoActual
+        intencion:       'FLUJO_NORMAL',
+        respuesta:       contenido,
+        accion:          'NINGUNA',
+        datosExtraidos:  {},
+        perfilScore:     0,
+        pasoActual:      momentoActual
       }
     }
 
@@ -378,55 +409,74 @@ async function actualizarPerfil(leadId, datosExtraidos) {
 }
 
 // ════════════════════════════════════════════════════════════
-// ACTION EXECUTOR — briefing limpio sin mensaje predeterminado
+// ACTION EXECUTOR — briefing como dosier de inteligencia
 // ════════════════════════════════════════════════════════════
-async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, cam }) {
+async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, cam, datosExtraidos }) {
   try {
     switch (accion) {
 
       case 'CERRAR_LEAD':
         await prisma.lead.update({
           where: { id: lead.id },
-          data: { estado: 'CERRADO' }
+          data:  { estado: 'CERRADO' }
         }).catch(() => {})
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { state: 'CLOSED' }
+          data:  { state: 'CLOSED' }
         }).catch(() => {})
         console.log(`[ActionExecutor] CERRAR_LEAD: ${lead.telefono}`)
         break
 
       case 'NOTIFICAR_VENDEDOR':
         if (vendor?.whatsappNumber) {
-          const nombre     = lead.nombreDetectado  || 'Sin nombre'
+          const nombre     = lead.nombreDetectado   || 'Sin nombre'
           const producto   = lead.productoDetectado || 'Sin producto'
-          const score      = lead.perfilScore       || 0
+          const score      = lead.perfilScore        || 0
           const emoji      = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
-          const horario    = extraerHorario(texto)  || 'horario por confirmar'
-          const campNombre = cam?.nombre            || 'MPX'
+          const horarioRaw = extraerHorario(texto)   || 'horario por confirmar'
+          const campNombre = cam?.nombre             || 'MPX'
+          const captado    = fechaLima()
+          const cita       = fechaLlamaLima(horarioRaw)
 
-          // Link limpio — sin mensaje predeterminado
-          // El vendedor escribe lo que él considere apropiado
+          // Inteligencia comercial — generada por Groq o fallback
+          const intel    = datosExtraidos?.inteligenciaComercial || 'perfil por evaluar en llamada'
+          const palanca  = datosExtraidos?.palancierre           || 'conectar con su motivación principal'
+          const angulo   = datosExtraidos?.anguloEntrada         || 'empieza por su producto y su país'
+          const pais     = datosExtraidos?.paisDestino           || 'por confirmar en llamada'
+
           const briefing =
-`${emoji} LEAD LISTO PARA LLAMADA
-
-https://wa.me/${lead.telefono}
-
-━━━━━━━━━━━━━━━━━━━━━
-👤 ${nombre}
-📦 ${producto}
-🕐 Llamar: ${horario}
-📚 ${campNombre}
-━━━━━━━━━━━━━━━━━━━━━
-💬 "${texto?.slice(0, 100)}"
-
-⚡ ${score >= 7 ? 'Llama AHORA — alta prioridad' : 'Llama hoy'}`
+`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${emoji} LEAD CALIFICADO · ${campNombre}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+wa.me/${lead.telefono}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤  ${nombre}
+📦  ${producto}
+🏢  ${datosExtraidos?.tieneEmpresa === false ? 'Independiente · sin empresa constituida' : datosExtraidos?.tieneEmpresa ? 'Tiene empresa constituida' : 'Situación empresarial: por confirmar'}
+🌱  ${datosExtraidos?.experiencia ? 'Con experiencia exportando' : 'Sin experiencia · primera vez'}
+🌍  País destino: ${pais}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅  CITA AGENDADA
+    ${cita}
+    Sé puntual — él ya está esperando
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠  INTELIGENCIA COMERCIAL
+    ▸ Perfil: ${intel}
+    ▸ Ángulo de entrada: ${angulo}
+    ▸ Palanca de cierre: ${palanca}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💬  Con sus propias palabras:
+    "${texto?.slice(0, 100)}"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🕒  Captado: ${captado}
+⚡  Lead caliente · no lo dejes enfriar
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
           await enviarTexto(instancia, vendor.whatsappNumber, briefing).catch(() => {})
         }
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { state: 'NOTIFIED', vendorNotifiedAt: new Date() }
+          data:  { state: 'NOTIFIED', vendorNotifiedAt: new Date() }
         }).catch(() => {})
         console.log(`[ActionExecutor] NOTIFICAR_VENDEDOR: ${lead.telefono}`)
         break
@@ -438,11 +488,11 @@ https://wa.me/${lead.telefono}
       case 'CAMBIAR_ESTADO_PAYMENT':
         await prisma.lead.update({
           where: { id: lead.id },
-          data: { estado: 'PAGO_PENDIENTE' }
+          data:  { estado: 'PAGO_PENDIENTE' }
         }).catch(() => {})
         await prisma.conversation.update({
           where: { id: conv.id },
-          data: { state: 'PAYMENT' }
+          data:  { state: 'PAYMENT' }
         }).catch(() => {})
         console.log(`[ActionExecutor] CAMBIAR_ESTADO_PAYMENT: ${lead.telefono}`)
         break
@@ -510,7 +560,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
       try {
 
         const conv = await prisma.conversation.findFirst({
-          where: { leadId: lead.id },
+          where:   { leadId: lead.id },
           orderBy: { createdAt: 'desc' }
         })
 
@@ -519,7 +569,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         if (conv?.id) {
           await prisma.conversation.update({
             where: { id: conv.id },
-            data: { lastLeadMessageAt: new Date() }
+            data:  { lastLeadMessageAt: new Date() }
           }).catch(() => {})
         }
 
@@ -531,9 +581,9 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         }
 
         const historial = await prisma.message.findMany({
-          where: { leadId: lead.id },
+          where:   { leadId: lead.id },
           orderBy: { createdAt: 'asc' },
-          take: 15
+          take:    20
         })
 
         const perfilActual = {
@@ -543,21 +593,61 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           pasoActual: lead.pasoActual        || 1
         }
 
-        // ── CÓDIGO DETECTA EL MOMENTO ────────────────────────
+        // ── CÓDIGO DETECTA EL MOMENTO ─────────────────────
         const momentoActual = detectarMomento(lead, historial)
         console.log(`[Flujo] Momento detectado: ${momentoActual} | nombre:${perfilActual.nombre} | producto:${perfilActual.producto}`)
 
-        // ── Campaña + pasos del vendedor ─────────────────────
+        // ── Campaña + pasos del vendedor ──────────────────
         const cam = lead.campaignId
           ? await prisma.campaign.findUnique({
-              where: { id: lead.campaignId },
+              where:   { id: lead.campaignId },
               include: { steps: { orderBy: { orden: 'asc' } } }
             })
           : null
 
         const pasosVendedor = cam?.steps || []
 
-        // ── GROQ — ejecuta el momento que el código decidió ──
+        // ════════════════════════════════════════════════════
+        // CORTOCIRCUITO M5 / M6 — Groq no participa
+        // ════════════════════════════════════════════════════
+        const respuestaDeterministica = generarRespuestaDeterministica(
+          momentoActual,
+          perfilActual.nombre,
+          perfilActual.producto,
+          mensaje
+        )
+
+        if (respuestaDeterministica) {
+          const accionFinal = momentoActual === 6 ? 'NOTIFICAR_VENDEDOR' : 'NINGUNA'
+
+          await sleep(800)
+          await enviarTexto(instanciaActiva, telefono, respuestaDeterministica)
+          await guardarMsg(lead.id, conv?.id || null, 'BOT', respuestaDeterministica)
+
+          if (conv?.id) {
+            await prisma.conversation.update({
+              where: { id: conv.id },
+              data:  { lastBotMessageAt: new Date() }
+            }).catch(() => {})
+          }
+
+          if (accionFinal === 'NOTIFICAR_VENDEDOR' && conv?.id) {
+            await ejecutarAccion({
+              accion:         'NOTIFICAR_VENDEDOR',
+              lead, conv,
+              instancia:      instanciaActiva,
+              vendor:         vendorActivo,
+              texto:          mensaje,
+              cam,
+              datosExtraidos: {}
+            })
+          }
+
+          console.log(`[Flujo] M${momentoActual} DETERMINÍSTICO | accion: ${accionFinal} | vendor: ${vendorActivo.nombre} | ${telefono}`)
+          return
+        }
+
+        // ── GROQ — solo M1, M2, M3, M4, M7 ──────────────
         const resultado = await consultarGroq({
           historial,
           textoActual:    mensaje,
@@ -573,15 +663,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
         const respuesta = resultado?.respuesta || `Un momento, déjame revisar 😊`
 
-        // ── ACCIÓN FINAL — código fuerza la acción correcta ──
-        // Momento 6 → siempre NOTIFICAR_VENDEDOR
-        // Momento 5 → siempre NINGUNA
-        // Momento 7 → solo CERRAR_LEAD o PEDIR_COMPROBANTE si Groq lo decide
-        //             nunca NOTIFICAR_VENDEDOR
-        // Otros → Groq decide
+        // ── ACCIÓN FINAL ──────────────────────────────────
         const accionFinal = (() => {
-          if (momentoActual === 6) return 'NOTIFICAR_VENDEDOR'
-          if (momentoActual === 5) return 'NINGUNA'
           if (momentoActual === 7) {
             const accion = resultado?.accion || 'NINGUNA'
             return accion === 'NOTIFICAR_VENDEDOR' ? 'NINGUNA' : accion
@@ -592,7 +675,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         if (conv?.id) {
           await prisma.conversation.update({
             where: { id: conv.id },
-            data: { lastBotMessageAt: new Date() }
+            data:  { lastBotMessageAt: new Date() }
           }).catch(() => {})
         }
 
@@ -607,18 +690,21 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         if (resultado?.pasoActual) {
           await prisma.lead.update({
             where: { id: lead.id },
-            data: { pasoActual: resultado.pasoActual }
+            data: {
+              pasoActual: Math.max(lead.pasoActual || 1, resultado.pasoActual)
+            }
           }).catch(() => {})
         }
 
         if (accionFinal !== 'NINGUNA' && conv?.id) {
           await ejecutarAccion({
-            accion:    accionFinal,
+            accion:         accionFinal,
             lead, conv,
-            instancia: instanciaActiva,
-            vendor:    vendorActivo,
-            texto:     mensaje,
-            cam
+            instancia:      instanciaActiva,
+            vendor:         vendorActivo,
+            texto:          mensaje,
+            cam,
+            datosExtraidos: resultado?.datosExtraidos || {}
           })
         }
 
@@ -664,8 +750,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
 
     await guardarMsg(newLead.id, conv?.id || null, 'LEAD', mensaje)
 
-    const pasos = campaign?.steps?.filter(s => s.tipo === 'MSG') || []
-    const paso1 = pasos[0]
+    const pasos    = campaign?.steps?.filter(s => s.tipo === 'MSG') || []
+    const paso1    = pasos[0]
 
     const msgBienvenida = paso1?.mensaje
       ? interp(paso1.mensaje, {
