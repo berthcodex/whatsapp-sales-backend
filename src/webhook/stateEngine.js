@@ -1,10 +1,11 @@
-// src/webhook/stateEngine.js — v16 HIDATA 111X
-// v16 — M4 determinístico desde BD — Groq solo en M7
-// v16 — Extractor de perfil básico en M2 sin LLM
-// v15 — M2, M3, M5, M6 determinísticos
-// v14 — Briefing dosier de inteligencia comercial
-// v14 — detectarMomento M7 robusto
-// v14 — Math.max en pasoActual — take:20 historial
+// src/webhook/stateEngine.js — v17 HIDATA 111X
+// v17 — 13 escapes corregidos
+// v17 — calcularCita() fuente única fecha/hora para M6 y briefing
+// v17 — capitalizar() normaliza nombre y producto
+// v17 — extraerPais() persiste país en BD
+// v17 — actualizarVendedor() en M7 cuando llega el país
+// v17 — género neutral en briefing
+// v16 — M2,M3,M4,M5,M6 determinísticos — Groq solo M7
 
 import prisma from '../db/prisma.js'
 import { resolverCampaign } from './routerInteligente.js'
@@ -59,49 +60,112 @@ function interp(msg, vars) {
 }
 
 // ════════════════════════════════════════════════════════════
-// EXTRACTOR DE PERFIL BÁSICO — sin LLM, regex puro
-// Se ejecuta en M2 para capturar nombre y producto
+// NORMALIZACIÓN — escape 2, 5, 7
+// ════════════════════════════════════════════════════════════
+function capitalizar(texto) {
+  if (!texto) return ''
+  return texto.trim().charAt(0).toUpperCase() +
+         texto.trim().slice(1).toLowerCase()
+}
+
+// ════════════════════════════════════════════════════════════
+// EXTRACTOR DE HORA SOLA — escape 3, 8, 12
+// ════════════════════════════════════════════════════════════
+function extraerHoraSola(texto) {
+  if (!texto) return null
+  const patterns = [
+    /(\d{1,2}:\d{2}\s*(?:am|pm))/i,
+    /(\d{1,2}\s*(?:am|pm))/i,
+    /(\d{1,2}:\d{2})/,
+    /a\s+las\s+(\d{1,2}(?::\d{2})?)/i,
+  ]
+  for (const p of patterns) {
+    const m = texto.match(p)
+    if (m) return m[1].trim()
+  }
+  return null
+}
+
+// ════════════════════════════════════════════════════════════
+// CALCULAR CITA — fuente única fecha y hora — escape 1,6,10,11
+// ════════════════════════════════════════════════════════════
+function calcularCita(mensajeActual) {
+  const mencionaManana = /mañana|manana/i.test(mensajeActual)
+  const mencionaHoy    = /\bhoy\b/i.test(mensajeActual)
+  const hora           = extraerHoraSola(mensajeActual)
+
+  const fechaRef = new Date()
+  if (mencionaManana) fechaRef.setDate(fechaRef.getDate() + 1)
+
+  const fechaTexto = (mencionaManana || mencionaHoy)
+    ? fechaRef.toLocaleDateString('es-PE', {
+        timeZone: 'America/Lima',
+        weekday:  'long',
+        day:      'numeric',
+        month:    'long',
+        year:     'numeric'
+      })
+    : null
+
+  // Texto para mensaje al lead
+  const confirmacion = fechaTexto && hora
+    ? `el ${fechaTexto} a las ${hora}`
+    : fechaTexto
+      ? `el ${fechaTexto}`
+      : hora
+        ? `a las ${hora}`
+        : 'en el horario acordado'
+
+  // Texto para briefing vendedor
+  const citaBriefing = fechaTexto && hora
+    ? `${fechaTexto} · ${hora}`
+    : fechaTexto || hora || 'horario por confirmar'
+
+  return { confirmacion, citaBriefing, hora, fechaTexto }
+}
+
+// ════════════════════════════════════════════════════════════
+// EXTRACTOR DE PAÍS — escape 4, 13
+// ════════════════════════════════════════════════════════════
+function extraerPais(texto) {
+  if (!texto) return null
+  const paises = [
+    'españa','estados unidos','usa','eeuu','chile','colombia',
+    'méxico','mexico','argentina','brasil','brazil','canada',
+    'alemania','francia','italia','china','japón','japon',
+    'reino unido','australia','holanda','países bajos','panama',
+    'ecuador','bolivia','uruguay','paraguay','costa rica',
+    'miami','nueva york','new york','europa','asia'
+  ]
+  const t = texto.toLowerCase()
+  for (const p of paises) {
+    if (t.includes(p)) return capitalizar(p)
+  }
+  return null
+}
+
+// ════════════════════════════════════════════════════════════
+// EXTRACTOR DE PERFIL BÁSICO — M2 sin LLM
 // ════════════════════════════════════════════════════════════
 function extraerPerfilBasico(texto) {
   const datos = {}
   if (!texto) return datos
 
-  // Nombre — "me llamo X", "soy X", "mi nombre es X"
   const nombreMatch = texto.match(
     /(?:me llamo|soy|mi nombre es)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)/i
   )
-  if (nombreMatch) datos.nombre = nombreMatch[1]
+  if (nombreMatch) datos.nombre = capitalizar(nombreMatch[1])
 
-  // Producto — "quiero exportar X", "exportar X", "tengo X", "produzco X"
   const productoMatch = texto.match(
     /(?:exportar|quiero exportar|vender|tengo|produzco|mi producto es)\s+([a-záéíóúñ\s]+?)(?:\s*,|\s*\.|\s*y\s|\s*$)/i
   )
-  if (productoMatch) datos.producto = productoMatch[1].trim()
+  if (productoMatch) datos.producto = capitalizar(productoMatch[1].trim())
 
   return datos
 }
 
 // ════════════════════════════════════════════════════════════
-// EXTRACTOR DE HORARIO
-// ════════════════════════════════════════════════════════════
-function extraerHorario(texto) {
-  if (!texto) return null
-  const patterns = [
-    /(\d{1,2}:\d{2}\s*(?:am|pm)?)/i,
-    /(\d{1,2}\s*(?:am|pm))/i,
-    /(mañana\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
-    /(hoy\s+a\s+las\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
-    /(mañana|hoy|tarde|noche|mediodía)/i,
-  ]
-  for (const p of patterns) {
-    const m = texto.match(p)
-    if (m) return m[1]
-  }
-  return texto.slice(0, 30)
-}
-
-// ════════════════════════════════════════════════════════════
-// FECHA LIMA
+// FECHA LIMA — para captado en briefing
 // ════════════════════════════════════════════════════════════
 function fechaLima() {
   return new Date().toLocaleString('es-PE', {
@@ -114,16 +178,6 @@ function fechaLima() {
   })
 }
 
-function fechaLlamaLima(horarioRaw) {
-  const ahora = new Date().toLocaleDateString('es-PE', {
-    timeZone: 'America/Lima',
-    day:      '2-digit',
-    month:    'long',
-    year:     'numeric'
-  })
-  return `${ahora} · ${horarioRaw}`
-}
-
 // ════════════════════════════════════════════════════════════
 // DETECTOR DE MOMENTO — el código decide, no Groq
 // ════════════════════════════════════════════════════════════
@@ -131,15 +185,14 @@ function detectarMomento(lead, historial) {
   const botMensajes  = historial.filter(m => m.origen === 'BOT').map(m => m.texto.toLowerCase())
   const leadMensajes = historial.filter(m => m.origen === 'LEAD').map(m => m.texto.toLowerCase())
 
-  // ── Momento 7 — bot ya hizo cierre ───────────────────────
   const yaHizoCierre = botMensajes.some(m =>
+    m.includes('ya te tengo en agenda') ||
     m.includes('te llamo y vemos todo') ||
     m.includes('nos hablamos') ||
     m.includes('hablamos pronto')
   )
   if (yaHizoCierre) return 7
 
-  // ── Detectar si ya presentamos el programa ───────────────
   const yaPresento = botMensajes.some(m =>
     m.includes('exporta con 1,000') ||
     m.includes('curso taller') ||
@@ -148,13 +201,11 @@ function detectarMomento(lead, historial) {
     m.includes('diseñado para personas en tu situación')
   )
 
-  // ── Detectar si ya preguntamos horario ───────────────────
   const yaPreguntoHorario = botMensajes.some(m =>
     m.includes('a qué hora te viene mejor') ||
     m.includes('a que hora te viene mejor')
   )
 
-  // ── Lead confirmó horario — patrones estrictos ───────────
   const leadConfirmoHorario = yaPreguntoHorario && leadMensajes.some(m => {
     return /\d{1,2}:\d{2}/.test(m)                ||
            /\d{1,2}\s*(am|pm)/i.test(m)           ||
@@ -206,15 +257,14 @@ function detectarMomento(lead, historial) {
 }
 
 // ════════════════════════════════════════════════════════════
-// GENERADOR DETERMINÍSTICO — M2, M3, M4, M5, M6 sin Groq
-// Groq SOLO en M7
+// GENERADOR DETERMINÍSTICO — M2,M3,M4,M5,M6
 // ════════════════════════════════════════════════════════════
 function generarRespuestaDeterministica(momentoActual, nombre, producto, mensajeActual, pasosVendedor) {
-  const n = nombre   ? ` ${nombre}`  : ''
-  const p = producto || 'tu producto'
+  const n  = nombre   ? ` ${capitalizar(nombre)}`   : ''
+  const p  = producto ? capitalizar(producto)        : 'tu producto'
 
   if (momentoActual === 2) {
-    const prod = producto ? `El ${producto} tiene bastante potencial afuera. ` : ''
+    const prod = producto ? `El ${p} tiene bastante potencial afuera. ` : ''
     return `Muchas gracias${n} 😊 ${prod}Cuéntame, ¿ya tienes experiencia exportando o estás dando tus primeros pasos?`
   }
 
@@ -223,14 +273,11 @@ function generarRespuestaDeterministica(momentoActual, nombre, producto, mensaje
   }
 
   if (momentoActual === 4) {
-    const paso3 = pasosVendedor?.find(p => p.orden === 3)
+    const paso3  = pasosVendedor?.find(p => p.orden === 3)
     const cuerpo = paso3?.mensaje?.trim() || null
-
     if (cuerpo) {
       return `Mira${n}, justamente tenemos un programa diseñado para personas en tu situación. Te cuento:\n\n${cuerpo}\n\n¿Qué te parece${n}? ¿Tienes alguna duda o consulta?`
     }
-
-    // Fallback digno si no hay paso3 en BD
     return `Mira${n}, tenemos un programa diseñado exactamente para tu caso 😊 Dame un momento y te cuento todos los detalles.`
   }
 
@@ -239,28 +286,25 @@ function generarRespuestaDeterministica(momentoActual, nombre, producto, mensaje
   }
 
   if (momentoActual === 6) {
-    const horario = extraerHorario(mensajeActual) || 'en el horario acordado'
-    return `Listo${n} 😊 ${horario} te llamo y vemos todo juntos. Ah, y cuéntame — ¿a qué país te gustaría llevar tu ${p}? 🌍 Así voy preparado para tu caso.`
+    const { confirmacion } = calcularCita(mensajeActual)
+    return `Listo${n} 😊 quedamos ${confirmacion}. Ya te tengo en agenda 📋 Por cierto, ¿a qué país te gustaría llevar tu ${p}? 🌍 Así llego preparado para tu caso.`
   }
 
   return null
 }
 
 // ════════════════════════════════════════════════════════════
-// GROQ BRAIN v16 — SOLO M7
+// GROQ BRAIN v17 — SOLO M7
 // ════════════════════════════════════════════════════════════
 async function consultarGroq({
-  historial, textoActual, esImagen, convState,
-  perfilActual, botPrompt, campaignNombre,
-  nombreVendedor
+  historial, textoActual, esImagen,
+  perfilActual, botPrompt, campaignNombre, nombreVendedor
 }) {
   try {
     if (!process.env.GROQ_API_KEY) return null
 
     const promptBase = botPrompt
-      ? botPrompt
-          .replace(/""/g, '"')
-          .replace(/\[NOMBRE_ASESOR\]/g, nombreVendedor)
+      ? botPrompt.replace(/""/g, '"').replace(/\[NOMBRE_ASESOR\]/g, nombreVendedor)
       : `Eres ${nombreVendedor}, asesor de ${campaignNombre || 'Peru Exporta TV'}.
 Tu misión es calificar al lead, no venderle. El cierre es por teléfono.
 Responde siempre en español, máximo 3 líneas, un emoji por mensaje.
@@ -272,7 +316,7 @@ Nunca reveles que eres IA.`
     const systemPrompt =
 `${promptBase}
 
-CONTEXTO TÉCNICO (nunca lo menciones al lead):
+CONTEXTO (nunca lo menciones al lead):
 - Nombre: ${nombre}
 - Producto: ${producto}
 - Estado: POST_CIERRE
@@ -282,33 +326,28 @@ CONTEXTO TÉCNICO (nunca lo menciones al lead):
 ════════════════════════════════════════
 MOMENTO 7 — POST CIERRE
 ════════════════════════════════════════
-La cita ya está confirmada. El lead sigue escribiendo — está caliente.
-Tu tarea:
-1. Responde natural, breve y cálido a lo que dice.
+La cita está confirmada. El lead sigue escribiendo — está caliente.
+1. Responde natural, breve y cálido.
 2. Recoge información nueva en datosExtraidos.
-3. Mantén la conversación caliente hasta la llamada.
+3. Mantén conversación caliente hasta la llamada.
 4. Máximo 2 líneas. Un emoji.
-5. NO vuelvas a preguntar horario.
-6. NO vuelvas a presentar el programa.
-7. NO vuelvas a despedirte.
+5. NO preguntes horario de nuevo.
+6. NO presentes el programa de nuevo.
+7. NO te despidas de nuevo.
 accion DEBE ser NINGUNA — salvo:
-- Lead rechaza explícitamente → CERRAR_LEAD
+- Lead rechaza → CERRAR_LEAD
 - Lead declara pago → PEDIR_COMPROBANTE
 
-ADEMÁS extrae en datosExtraidos:
+Extrae en datosExtraidos:
+- paisDestino: país que mencionó
 - inteligenciaComercial: 1 línea perfil del lead
 - palancierre: 1 línea palanca de cierre
 - anguloEntrada: 1 línea cómo abrir la llamada
-- paisDestino: país que mencionó si lo dijo
 
-INSTRUCCIÓN CRÍTICA DE FORMATO:
-Respuesta COMPLETA ÚNICAMENTE JSON válido.
-Sin texto antes. Sin texto después. Sin markdown. Sin backticks.
-Primer carácter { — Último carácter }
-
+FORMATO: ÚNICAMENTE JSON válido. Sin texto antes ni después.
 {
   "intencion": "FLUJO_NORMAL|RECHAZO|PAGO_DECLARADO|DESVIO",
-  "respuesta": "texto que se envía al lead",
+  "respuesta": "texto al lead",
   "accion": "NINGUNA|CERRAR_LEAD|PEDIR_COMPROBANTE",
   "pasoActual": 7,
   "datosExtraidos": {
@@ -331,8 +370,8 @@ Primer carácter { — Último carácter }
     const timeout    = setTimeout(() => controller.abort(), 8000)
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      signal: controller.signal,
+      method:  'POST',
+      signal:  controller.signal,
       headers: {
         'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
         'Content-Type':  'application/json'
@@ -350,7 +389,6 @@ Primer carácter { — Último carácter }
     })
 
     clearTimeout(timeout)
-
     if (!response.ok) {
       console.error('[Brain IA] Groq HTTP error:', response.status)
       return null
@@ -358,8 +396,7 @@ Primer carácter { — Último carácter }
 
     const data      = await response.json()
     const contenido = data.choices[0]?.message?.content?.trim()
-
-    const limpio = (() => {
+    const limpio    = (() => {
       const match = contenido.match(/\{[\s\S]*\}/)
       return match ? match[0] : contenido
     })()
@@ -377,7 +414,6 @@ Primer carácter { — Último carácter }
         pasoActual:     7
       }
     }
-
   } catch (err) {
     console.error('[Brain IA] Groq falló:', err.message)
     return null
@@ -400,9 +436,9 @@ async function actualizarPerfil(leadId, datosExtraidos) {
 }
 
 // ════════════════════════════════════════════════════════════
-// ACTION EXECUTOR
+// ACTION EXECUTOR — briefing dosier inteligencia comercial
 // ════════════════════════════════════════════════════════════
-async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, cam, datosExtraidos }) {
+async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, cam, datosExtraidos, citaBriefing }) {
   try {
     switch (accion) {
 
@@ -420,18 +456,17 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, ca
 
       case 'NOTIFICAR_VENDEDOR':
         if (vendor?.whatsappNumber) {
-          const nombre     = lead.nombreDetectado   || 'Sin nombre'
-          const producto   = lead.productoDetectado || 'Sin producto'
-          const score      = lead.perfilScore        || 0
+          const nombre     = capitalizar(lead.nombreDetectado)   || 'Sin nombre'
+          const producto   = capitalizar(lead.productoDetectado) || 'Sin producto'
+          const score      = lead.perfilScore || 0
           const emoji      = score >= 7 ? '🔴' : score >= 4 ? '🟠' : '🟡'
-          const horarioRaw = extraerHorario(texto)   || 'horario por confirmar'
-          const campNombre = cam?.nombre             || 'MPX'
+          const campNombre = cam?.nombre || 'MPX'
           const captado    = fechaLima()
-          const cita       = fechaLlamaLima(horarioRaw)
+          const cita       = citaBriefing || 'horario por confirmar'
 
-          const intel   = datosExtraidos?.inteligenciaComercial || 'perfil por evaluar en llamada'
-          const palanca = datosExtraidos?.palancierre           || 'conectar con su motivación principal'
-          const angulo  = datosExtraidos?.anguloEntrada         || 'empieza por su producto y su país'
+          const intel   = datosExtraidos?.inteligenciaComercial || `${nombre} · ${producto} · primera vez exportando · sin empresa`
+          const palanca = datosExtraidos?.palancierre           || 'no atacar precio · atacar el costo de cada mes sin exportar'
+          const angulo  = datosExtraidos?.anguloEntrada         || 'pregunta por su mercado destino al abrir la llamada'
           const pais    = datosExtraidos?.paisDestino           || 'por confirmar en llamada'
 
           const empresaLinea = datosExtraidos?.tieneEmpresa === false
@@ -444,11 +479,16 @@ async function ejecutarAccion({ accion, lead, conv, instancia, vendor, texto, ca
             ? 'Con experiencia exportando'
             : 'Sin experiencia · primera vez'
 
+          // Ángulo dinámico según país — escape 13
+          const anguloFinal = pais !== 'por confirmar en llamada'
+            ? `empieza por ${pais} — ya tiene destino en mente`
+            : angulo
+
           const briefing =
 `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${emoji} LEAD CALIFICADO · ${campNombre}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-wa.me/${lead.telefono}
+https://wa.me/${lead.telefono}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 👤  ${nombre}
 📦  ${producto}
@@ -458,11 +498,11 @@ wa.me/${lead.telefono}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📅  CITA AGENDADA
     ${cita}
-    Sé puntual — él ya está esperando
+    Ya están esperando tu llamada
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🧠  INTELIGENCIA COMERCIAL
     ▸ Perfil: ${intel}
-    ▸ Ángulo de entrada: ${angulo}
+    ▸ Ángulo de entrada: ${anguloFinal}
     ▸ Palanca de cierre: ${palanca}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 💬  Con sus propias palabras:
@@ -479,6 +519,19 @@ wa.me/${lead.telefono}
           data:  { state: 'NOTIFIED', vendorNotifiedAt: new Date() }
         }).catch(() => {})
         console.log(`[ActionExecutor] NOTIFICAR_VENDEDOR: ${lead.telefono}`)
+        break
+
+      case 'ACTUALIZAR_PAIS_VENDEDOR':
+        // escape 13 — M7 detecta país y notifica al vendedor
+        if (vendor?.whatsappNumber && datosExtraidos?.paisDestino) {
+          const nombre = capitalizar(lead.nombreDetectado) || 'El lead'
+          await enviarTexto(
+            instancia,
+            vendor.whatsappNumber,
+            `📍 Actualización · ${nombre} confirmó *${datosExtraidos.paisDestino}* como destino para su ${capitalizar(lead.productoDetectado) || 'producto'}`
+          ).catch(() => {})
+          console.log(`[ActionExecutor] ACTUALIZAR_PAIS_VENDEDOR: ${lead.telefono} → ${datosExtraidos.paisDestino}`)
+        }
         break
 
       case 'PEDIR_COMPROBANTE':
@@ -523,9 +576,6 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     const nombreVendedor = vendor.nombre
     const lead = await prisma.lead.findUnique({ where: { telefono } })
 
-    // ════════════════════════════════════════════════════════
-    // LEAD EXISTENTE
-    // ════════════════════════════════════════════════════════
     if (lead) {
 
       let vendorActivo    = vendor
@@ -540,7 +590,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
             await enviarTexto(
               vendorDueno.instanciaEvolution,
               vendorDueno.whatsappNumber,
-              `📌 Tu lead escribió por otro número\n📱 wa.me/${lead.telefono}\n👤 ${lead.nombreDetectado || 'Sin nombre'}\n💬 "${mensaje?.slice(0, 80)}"`
+              `📌 Tu lead escribió por otro número\nhttps://wa.me/${lead.telefono}\n👤 ${lead.nombreDetectado || 'Sin nombre'}\n💬 "${mensaje?.slice(0, 80)}"`
             ).catch(() => {})
           }
           vendorActivo    = vendorDueno
@@ -604,7 +654,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         const pasosVendedor = cam?.steps || []
 
         // ════════════════════════════════════════════════════
-        // CORTOCIRCUITO M2→M6 — Groq no participa
+        // CORTOCIRCUITO M2→M6
         // ════════════════════════════════════════════════════
         const respuestaDeterministica = generarRespuestaDeterministica(
           momentoActual,
@@ -617,7 +667,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
         if (respuestaDeterministica) {
           const accionFinal = momentoActual === 6 ? 'NOTIFICAR_VENDEDOR' : 'NINGUNA'
 
-          // ── Extractor perfil básico en M2 ────────────────
+          // Extractor perfil M2
           if (momentoActual === 2) {
             const extraido = extraerPerfilBasico(mensaje)
             if (extraido.nombre || extraido.producto) {
@@ -640,6 +690,23 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           }
 
           if (accionFinal === 'NOTIFICAR_VENDEDOR' && conv?.id) {
+            // calcularCita — fuente única escape 1,6,10,11
+            const { citaBriefing } = calcularCita(mensaje)
+
+            // extraerPais del mensaje M6 — escape 4,13
+            const paisM6 = extraerPais(mensaje)
+
+            const inteligenciaM6 = {
+              tieneEmpresa:          false,
+              experiencia:           false,
+              paisDestino:           paisM6 || 'por confirmar en llamada',
+              inteligenciaComercial: `${capitalizar(perfilActual.nombre) || 'Lead'} · ${capitalizar(perfilActual.producto) || 'producto'} · primera vez exportando · sin empresa`,
+              palancierre:           'no atacar precio · atacar el costo de cada mes sin exportar',
+              anguloEntrada:         paisM6
+                ? `empieza por ${paisM6} — ya tiene destino en mente`
+                : 'pregunta por su mercado destino al abrir la llamada'
+            }
+
             await ejecutarAccion({
               accion:         'NOTIFICAR_VENDEDOR',
               lead, conv,
@@ -647,7 +714,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
               vendor:         vendorActivo,
               texto:          mensaje,
               cam,
-              datosExtraidos: perfilActual
+              datosExtraidos: inteligenciaM6,
+              citaBriefing
             })
           }
 
@@ -660,16 +728,14 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           historial,
           textoActual:    mensaje,
           esImagen,
-          convState,
           perfilActual,
           botPrompt:      cam?.botPrompt     || null,
           campaignNombre: cam?.nombre        || 'Peru Exporta TV',
           nombreVendedor: vendorActivo.nombre
         })
 
-        // Fallback digno si Groq falla en M7
         const respuesta = resultado?.respuesta ||
-          `Perfecto${perfilActual.nombre ? ` ${perfilActual.nombre}` : ''} 😊 Nos vemos en la llamada, cualquier duda me avisas.`
+          `Perfecto${perfilActual.nombre ? ` ${capitalizar(perfilActual.nombre)}` : ''} 😊 Nos vemos en la llamada, cualquier duda me avisas.`
 
         const accionFinal = (() => {
           const accion = resultado?.accion || 'NINGUNA'
@@ -691,6 +757,20 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
           await actualizarPerfil(lead.id, resultado.datosExtraidos)
         }
 
+        // escape 13 — M7 detecta país y actualiza al vendedor
+        if (momentoActual === 7 && resultado?.datosExtraidos?.paisDestino && conv?.id) {
+          await ejecutarAccion({
+            accion:         'ACTUALIZAR_PAIS_VENDEDOR',
+            lead, conv,
+            instancia:      instanciaActiva,
+            vendor:         vendorActivo,
+            texto:          mensaje,
+            cam,
+            datosExtraidos: resultado.datosExtraidos,
+            citaBriefing:   null
+          })
+        }
+
         if (resultado?.pasoActual) {
           await prisma.lead.update({
             where: { id: lead.id },
@@ -708,7 +788,8 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
             vendor:         vendorActivo,
             texto:          mensaje,
             cam,
-            datosExtraidos: resultado?.datosExtraidos || {}
+            datosExtraidos: resultado?.datosExtraidos || {},
+            citaBriefing:   null
           })
         }
 
@@ -722,7 +803,7 @@ export async function processIncoming({ telefono, mensaje, esImagen, instancia }
     }
 
     // ════════════════════════════════════════════════════════
-    // LEAD NUEVO — Router inteligente 2 capas
+    // LEAD NUEVO
     // ════════════════════════════════════════════════════════
     const campaign = await resolverCampaign(mensaje, prisma)
 
