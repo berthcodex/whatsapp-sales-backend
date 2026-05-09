@@ -14,6 +14,7 @@ datasource db {
 // ─── Vendedores ───────────────────────────────────────────────
 model Vendor {
   id                 Int                @id @default(autoincrement())
+  tenantId           String             @default("peru_exporta") @map("tenant_id")
   nombre             String
   telefono           String             @unique
   role               String             @default("VENDOR")
@@ -31,12 +32,14 @@ model Vendor {
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
+  @@index([tenantId])
   @@map("vendors")
 }
 
 // ─── Campañas ─────────────────────────────────────────────────
 model Campaign {
   id            Int            @id @default(autoincrement())
+  tenantId      String         @default("peru_exporta") @map("tenant_id")
   slug          String         @unique
   nombre        String
   activa        Boolean        @default(true)
@@ -51,6 +54,7 @@ model Campaign {
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 
+  @@index([tenantId])
   @@map("campaigns")
 }
 
@@ -81,6 +85,7 @@ model FlowStep {
 // ─── Leads ────────────────────────────────────────────────────
 model Lead {
   id                Int                 @id @default(autoincrement())
+  tenantId          String              @default("peru_exporta") @map("tenant_id")
   telefono          String              @unique
   campaignId        Int?
   campaign          Campaign?           @relation(fields: [campaignId], references: [id])
@@ -110,6 +115,7 @@ model Lead {
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
 
+  @@index([tenantId])
   @@map("leads")
 }
 
@@ -206,7 +212,6 @@ model LeadState {
 model TurnTrace {
   turnId               String        @id @default(uuid()) @map("turn_id")
   
-  // FK con SET NULL — preserva trace aunque lead se borre (GDPR)
   leadId               Int?          @map("lead_id")
   lead                 Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
   leadIdArchived       Int?          @map("lead_id_archived")
@@ -214,49 +219,35 @@ model TurnTrace {
   conversationId       Int?          @map("conversation_id")
   conversation         Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   
-  // Reset generation — múltiples "vidas" del mismo número
   resetGeneration      Int           @default(1) @map("reset_generation")
-  
-  // Data quality — separa pruebas de producción
   dataQuality          String        @default("real_pilot") @map("data_quality")
-  // 'test' | 'real_pilot' | 'real_paying' | 'synthetic'
   
-  // Mensaje del lead
   leadMessage          String        @db.Text @map("lead_message")
   leadMessageType      String        @default("text") @map("lead_message_type")
   
-  // Capa 1: Perception
   perception           Json          @default("{}")
   perceptionVersion    String?       @map("perception_version")
   
-  // Capa 2: State (snapshot pre/post)
   stateBefore          Json          @default("{}") @map("state_before")
   stateAfter           Json          @default("{}") @map("state_after")
   
-  // Mode Router (Three-Gate)
   modeRouterDecision   Json          @default("{}") @map("mode_router_decision")
   
-  // Capa 3: Policy
   policyDecision       Json          @default("{}") @map("policy_decision")
   policyVersion        String?       @map("policy_version")
   guardrailsEvaluated  String[]      @default([])  @map("guardrails_evaluated")
   
-  // Capa 4: Response
   botResponse          String?       @db.Text @map("bot_response")
   responseVersion      String?       @map("response_version")
   
-  // Modelo usado
   modelUsed            String?       @map("model_used")
   
-  // Auditoría
   auditLog             Json          @default("{}") @map("audit_log")
   errors               Json          @default("[]")
   
-  // Performance y costos
   latencyMs            Int?          @map("latency_ms")
   modelCosts           Json          @default("{}") @map("model_costs")
   
-  // Anonimización GDPR
   piiRedactedAt        DateTime?     @map("pii_redacted_at")
   
   createdAt            DateTime      @default(now()) @map("created_at")
@@ -360,4 +351,40 @@ model TestPhone {
   description  String?
 
   @@map("test_phones")
+}
+
+// ════════════════════════════════════════════════════════
+// MULTI-TENANT INFRASTRUCTURE
+// ════════════════════════════════════════════════════════
+
+// ─── Configuración por tenant + suscripción + quotas ──────────
+model TenantSettings {
+  tenantId                       String   @id @map("tenant_id")
+  displayName                    String   @map("display_name")
+  
+  // Modelo de suscripción
+  numVendedoresPagados           Int      @default(0)     @map("num_vendedores_pagados")
+  precioPorVendedorUsd           Decimal  @default(20.00) @map("precio_por_vendedor_usd") @db.Decimal(10,2)
+  periodoMeses                   Int      @default(6)     @map("periodo_meses")
+  fechaInicio                    DateTime?                @map("fecha_inicio")
+  fechaFin                       DateTime?                @map("fecha_fin")
+  montoTotalPagadoUsd            Decimal?                 @map("monto_total_pagado_usd") @db.Decimal(10,2)
+  estadoSuscripcion              String   @default("trial") @map("estado_suscripcion")
+  
+  // Quota operativa de turnos IA
+  turnosIncluidosPorVendedorMes  Int      @default(10000) @map("turnos_incluidos_por_vendedor_mes")
+  turnosConsumidosMesActual      Int      @default(0)     @map("turnos_consumidos_mes_actual")
+  mesActualInicio                DateTime @default(now()) @map("mes_actual_inicio")
+  
+  // API key dedicada (futuro multi-tenant real)
+  geminiApiKeyEncrypted          String?  @map("gemini_api_key_encrypted")
+  byokEnabled                    Boolean  @default(false) @map("byok_enabled")
+  
+  // Metadata
+  notas                          String?  @db.Text
+  
+  createdAt                      DateTime @default(now()) @map("created_at")
+  updatedAt                      DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("tenant_settings")
 }
