@@ -92,7 +92,21 @@ export async function analizarMensaje({
     try {
       perceptionOutput = JSON.parse(geminiResult.text)
     } catch (parseErr) {
-      errors.push({ phase: 'json_parse', error: parseErr.message })
+        // Capturar el output crudo para depurar
+      const rawOutput = geminiResult.text || '(empty)'
+      const rawPreview = rawOutput.length > 1000 
+        ? rawOutput.slice(0, 500) + '\n...[TRUNCADO]...\n' + rawOutput.slice(-500)
+        : rawOutput
+      
+      console.error('[Perception] JSON.parse failed. Raw Gemini output:')
+      console.error(rawPreview)
+      
+      errors.push({ 
+        phase: 'json_parse', 
+        error: parseErr.message,
+        raw_output_preview: rawPreview,
+        raw_output_length: rawOutput.length
+      })
       perceptionOutput = fallbackPerceptionOutput('json_parse_failed')
     }
 
