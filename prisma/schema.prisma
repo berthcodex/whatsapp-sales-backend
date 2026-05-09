@@ -7,21 +7,29 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ════════════════════════════════════════════════════════
+// MOTOR v19 — Modelos legacy (intactos durante migración)
+// ════════════════════════════════════════════════════════
+
 // ─── Vendedores ───────────────────────────────────────────────
 model Vendor {
-  id                 Int            @id @default(autoincrement())
+  id                 Int                @id @default(autoincrement())
   nombre             String
-  telefono           String         @unique
-  role               String         @default("VENDOR")
-  activo             Boolean        @default(true)
+  telefono           String             @unique
+  role               String             @default("VENDOR")
+  activo             Boolean            @default(true)
   instanciaEvolution String?
-  whatsappNumber     String?        @unique
-  pin                String?        @default("0000")
+  whatsappNumber     String?            @unique
+  pin                String?            @default("0000")
   campaigns          Campaign[]
   leads              Lead[]
   conversations      Conversation[]
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  leadStates         LeadState[]
+  callEvents         CallEvent[]
+  crmNotifications   CrmNotification[]
+  archivedLeads      Lead[]             @relation("LeadArchivedBy")
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 
   @@map("vendors")
 }
@@ -38,6 +46,8 @@ model Campaign {
   steps         FlowStep[]
   leads         Lead[]
   conversations Conversation[]
+  botPrompt     String?        @db.Text
+  version       Int            @default(1)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 
@@ -70,46 +80,60 @@ model FlowStep {
 
 // ─── Leads ────────────────────────────────────────────────────
 model Lead {
-  id                Int            @id @default(autoincrement())
-  telefono          String         @unique
+  id                Int                 @id @default(autoincrement())
+  telefono          String              @unique
   campaignId        Int?
-  campaign          Campaign?      @relation(fields: [campaignId], references: [id])
+  campaign          Campaign?           @relation(fields: [campaignId], references: [id])
   vendorId          Int?
-  vendor            Vendor?        @relation(fields: [vendorId], references: [id])
-  pasoActual        Int            @default(0)
+  vendor            Vendor?             @relation(fields: [vendorId], references: [id])
+  pasoActual        Int                 @default(0)
   ultimoMensaje     DateTime?
-  notificado        Boolean        @default(false)
-  estado            String         @default("NUEVO")
+  notificado        Boolean             @default(false)
+  estado            String              @default("NUEVO")
   nombreDetectado   String?
   productoDetectado String?
+  
+  // Soft delete fields (v20)
+  archivedAt        DateTime?           @map("archived_at")
+  archivedReason    String?             @map("archived_reason")
+  archivedById      Int?                @map("archived_by")
+  archivedBy        Vendor?             @relation("LeadArchivedBy", fields: [archivedById], references: [id], onDelete: SetNull)
+  
   mensajes          Message[]
   conversations     Conversation[]
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
+  leadState         LeadState?
+  turnTraces        TurnTrace[]
+  callEvents        CallEvent[]
+  commitments       Commitment[]
+  followupQueue     FollowupQueueItem[]
+  crmNotifications  CrmNotification[]
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
 
   @@map("leads")
 }
 
-// ─── Conversaciones (fuente de verdad del bot) ────────────────
+// ─── Conversaciones (fuente de verdad del bot v19) ────────────
 model Conversation {
-  id                      Int       @id @default(autoincrement())
+  id                      Int           @id @default(autoincrement())
   leadId                  Int
-  lead                    Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  lead                    Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
   campaignId              Int?
-  campaign                Campaign? @relation(fields: [campaignId], references: [id])
+  campaign                Campaign?     @relation(fields: [campaignId], references: [id])
   vendorId                Int?
-  vendor                  Vendor?   @relation(fields: [vendorId], references: [id])
-  state                   String    @default("ACTIVE") // ACTIVE | NOTIFIED | CLOSED | REACTIVATED
-  currentStep             Int       @default(0)
+  vendor                  Vendor?       @relation(fields: [vendorId], references: [id])
+  state                   String        @default("ACTIVE")
+  currentStep             Int           @default(0)
   lastBotMessageAt        DateTime?
   lastLeadMessageAt       DateTime?
-  reactivationCount       Int       @default(0)
+  reactivationCount       Int           @default(0)
   lastReactivationAt      DateTime?
   vendorNotifiedAt        DateTime?
-  vendorNotificationCount Int       @default(0)
+  vendorNotificationCount Int           @default(0)
   reminderJobId           String?
   messages                Message[]
-  createdAt               DateTime  @default(now())
+  turnTraces              TurnTrace[]
+  createdAt               DateTime      @default(now())
 
   @@unique([leadId, campaignId])
   @@map("conversations")
@@ -131,9 +155,10 @@ model Message {
 
 // ─── Configuración del bot ────────────────────────────────────
 model BotConfig {
-  id              Int      @id @default(autoincrement())
+  id              String   @id
   tenantId        String   @default("hidata")
   activo          Boolean  @default(true)
+  nombre          String?
   msgBienvenida   String?  @db.Text
   msgProducto     String?  @db.Text
   msgExperiencia  String?  @db.Text
@@ -146,4 +171,193 @@ model BotConfig {
   updatedEn       DateTime @default(now())
 
   @@map("bot_config")
+}
+
+// ════════════════════════════════════════════════════════
+// MOTOR v20 — Nueva arquitectura conversacional
+// 4 capas: Perception, State, Policy, Response
+// ════════════════════════════════════════════════════════
+
+// ─── Estado conversacional vivo ───────────────────────────────
+model LeadState {
+  leadId             Int      @id @map("lead_id")
+  lead               Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  
+  currentMode        String   @default("AUTO_CONSULTIVO") @map("current_mode")
+  currentStage       String   @default("greeting")        @map("current_stage")
+  slotsFilled        Json     @default("{}")              @map("slots_filled")
+  slotsPending       String[] @default([])                @map("slots_pending")
+  intentosPorSlot    Json     @default("{}")              @map("intentos_por_slot")
+  
+  vendorActiveId     Int?                                 @map("vendor_active_id")
+  vendor             Vendor?  @relation(fields: [vendorActiveId], references: [id], onDelete: SetNull)
+  
+  modeEnteredAt      DateTime @default(now())             @map("mode_entered_at")
+  lastMessageAt      DateTime @default(now())             @map("last_message_at")
+  returningLeadFlag  Boolean  @default(false)             @map("returning_lead_flag")
+  
+  createdAt          DateTime @default(now())             @map("created_at")
+  updatedAt          DateTime @default(now())             @updatedAt @map("updated_at")
+
+  @@map("lead_state")
+}
+
+// ─── Trace inmutable de cada turno conversacional ─────────────
+model TurnTrace {
+  turnId               String        @id @default(uuid()) @map("turn_id")
+  
+  // FK con SET NULL — preserva trace aunque lead se borre (GDPR)
+  leadId               Int?          @map("lead_id")
+  lead                 Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  leadIdArchived       Int?          @map("lead_id_archived")
+  
+  conversationId       Int?          @map("conversation_id")
+  conversation         Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  
+  // Reset generation — múltiples "vidas" del mismo número
+  resetGeneration      Int           @default(1) @map("reset_generation")
+  
+  // Data quality — separa pruebas de producción
+  dataQuality          String        @default("real_pilot") @map("data_quality")
+  // 'test' | 'real_pilot' | 'real_paying' | 'synthetic'
+  
+  // Mensaje del lead
+  leadMessage          String        @db.Text @map("lead_message")
+  leadMessageType      String        @default("text") @map("lead_message_type")
+  
+  // Capa 1: Perception
+  perception           Json          @default("{}")
+  perceptionVersion    String?       @map("perception_version")
+  
+  // Capa 2: State (snapshot pre/post)
+  stateBefore          Json          @default("{}") @map("state_before")
+  stateAfter           Json          @default("{}") @map("state_after")
+  
+  // Mode Router (Three-Gate)
+  modeRouterDecision   Json          @default("{}") @map("mode_router_decision")
+  
+  // Capa 3: Policy
+  policyDecision       Json          @default("{}") @map("policy_decision")
+  policyVersion        String?       @map("policy_version")
+  guardrailsEvaluated  String[]      @default([])  @map("guardrails_evaluated")
+  
+  // Capa 4: Response
+  botResponse          String?       @db.Text @map("bot_response")
+  responseVersion      String?       @map("response_version")
+  
+  // Modelo usado
+  modelUsed            String?       @map("model_used")
+  
+  // Auditoría
+  auditLog             Json          @default("{}") @map("audit_log")
+  errors               Json          @default("[]")
+  
+  // Performance y costos
+  latencyMs            Int?          @map("latency_ms")
+  modelCosts           Json          @default("{}") @map("model_costs")
+  
+  // Anonimización GDPR
+  piiRedactedAt        DateTime?     @map("pii_redacted_at")
+  
+  createdAt            DateTime      @default(now()) @map("created_at")
+
+  @@map("turn_trace")
+}
+
+// ─── Eventos de llamada con outcome tagging ───────────────────
+model CallEvent {
+  id                    String       @id @default(uuid())
+  leadId                Int          @map("lead_id")
+  lead                  Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  vendorId              Int          @map("vendor_id")
+  vendor                Vendor       @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  
+  scheduledAt           DateTime?    @map("scheduled_at")
+  occurredAt            DateTime?    @map("occurred_at")
+  durationSeconds       Int?         @map("duration_seconds")
+  
+  outcomeTag            String?      @map("outcome_tag")
+  modalidadAcordada     String?      @map("modalidad_acordada")
+  fechaProximoEvento    DateTime?    @map("fecha_proximo_evento")
+  condicionesEspeciales String?      @db.Text @map("condiciones_especiales")
+  vendorNotes           String?      @db.Text @map("vendor_notes")
+  voiceNoteUrl          String?      @map("voice_note_url")
+  
+  commitments           Commitment[]
+  
+  createdAt             DateTime     @default(now()) @map("created_at")
+
+  @@map("call_events")
+}
+
+// ─── Compromisos extraídos ────────────────────────────────────
+model Commitment {
+  id               String     @id @default(uuid())
+  leadId           Int        @map("lead_id")
+  lead             Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  callEventId      String?    @map("call_event_id")
+  callEvent        CallEvent? @relation(fields: [callEventId], references: [id], onDelete: SetNull)
+  
+  description      String     @db.Text
+  dueDate          DateTime   @map("due_date")
+  fulfilled        Boolean    @default(false)
+  fulfilledAt      DateTime?  @map("fulfilled_at")
+  
+  reminderSent     Boolean    @default(false) @map("reminder_sent")
+  reminderSentAt   DateTime?  @map("reminder_sent_at")
+  
+  createdAt        DateTime   @default(now()) @map("created_at")
+  updatedAt        DateTime   @default(now()) @updatedAt @map("updated_at")
+
+  @@map("commitments")
+}
+
+// ─── Cola de followup automático ──────────────────────────────
+model FollowupQueueItem {
+  id               String    @id @default(uuid())
+  leadId           Int       @map("lead_id")
+  lead             Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  
+  scheduledFor     DateTime  @map("scheduled_for")
+  contextSnapshot  Json      @default("{}") @map("context_snapshot")
+  followupType     String    @default("soft_reengagement") @map("followup_type")
+  
+  executed         Boolean   @default(false)
+  executedAt       DateTime? @map("executed_at")
+  result           String?   @db.Text
+  
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@map("followup_queue")
+}
+
+// ─── Notificaciones priorizadas para CRM ──────────────────────
+model CrmNotification {
+  id               String    @id @default(uuid())
+  vendorId         Int       @map("vendor_id")
+  vendor           Vendor    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  leadId           Int?      @map("lead_id")
+  lead             Lead?     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  
+  priority         String
+  title            String
+  message          String    @db.Text
+  payload          Json      @default("{}")
+  
+  acknowledged     Boolean   @default(false)
+  acknowledgedAt   DateTime? @map("acknowledged_at")
+  
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@map("crm_notifications")
+}
+
+// ─── Lista de teléfonos de prueba ─────────────────────────────
+model TestPhone {
+  telefono     String   @id
+  addedAt      DateTime @default(now()) @map("added_at")
+  addedBy      String?  @map("added_by")
+  description  String?
+
+  @@map("test_phones")
 }
