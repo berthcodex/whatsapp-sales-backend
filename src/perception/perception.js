@@ -197,8 +197,9 @@ export async function analizarMensaje({
     }
   }
 
-  // ─── 8. Incrementar contador del tenant ───
-  if (geminiResult?.usage) {
+ // ─── 8. Incrementar contador del tenant ───
+  // Solo si saveTrace=true (es turno de producción real, no debug ni eval)
+  if (geminiResult?.usage && saveTrace) {
     await incrementarTurnoConsumido(tenantId).catch(err =>
       console.error('[Perception] Error incrementing tenant counter:', err.message)
     )
