@@ -1,5 +1,6 @@
 // src/server.js — Hidata v20
-// + Endpoint /debug/run-perception-evals para correr el dataset
+// + Endpoint /debug/state-test (Día 3)
+// + Endpoint /debug/run-perception-evals (Día 2)
 
 import 'dotenv/config'
 import { readFile } from 'node:fs/promises'
@@ -26,6 +27,9 @@ import { geminiHealthCheck } from './lib/gemini.js'
 import { analizarMensaje, analizarMensajeStateless } from './perception/perception.js'
 import { buildPerceptionContext, summarizeContext } from './perception/perception-context-builder.js'
 import { classifyExpectedIntent } from './perception/perception-schema.js'
+import { actualizarEstado } from './state/state.js'
+import { summarizeTransition } from './state/state-transitions.js'
+import { describeLeadState } from './state/stage-definitions.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -101,13 +105,147 @@ app.post('/debug/perception-test', async (req, reply) => {
   }
 })
 
-// ── Debug — Run Perception Evals ─────────────────────────────
+// ════════════════════════════════════════════════════════
+// ── Debug — State Layer test (Día 3) ─────────────────────────
+// Pipeline completo: Perception → State
+// 
+// Body:
+//   { mensaje: string, telefono: string, tenantId?: string }
+//
+// Devuelve:
+//   - perception output
+//   - state result (con transition y mergeResult)
+//   - resumen humano para debug
+// ════════════════════════════════════════════════════════
+app.post('/debug/state-test', async (req, reply) => {
+  const startTime = Date.now()
+  const { mensaje, telefono, tenantId = 'peru_exporta' } = req.body || {}
+
+  // Validación
+  if (!mensaje || !telefono) {
+    return reply.status(400).send({
+      error: 'Body must include both "mensaje" and "telefono"',
+      example: {
+        mensaje: 'Hola, soy Juan, quiero exportar palta',
+        telefono: '51938188585'
+      }
+    })
+  }
+
+  try {
+    // ─── 1. Construir contexto (para los flags) ───
+    const builtContext = await buildPerceptionContext({
+      telefono, mensaje, tenantId
+    })
+
+    const leadId = builtContext.contexto.lead_id
+    const contextFlags = builtContext.contexto.flags
+
+    if (!leadId) {
+      return reply.status(404).send({
+        error: 'Lead does not exist. State Layer requires existing lead.',
+        telefono,
+        hint: 'Try /debug/perception-test first to verify the lead exists.'
+      })
+    }
+
+    // ─── 2. Llamar Perception (modo full, guarda turn_trace) ───
+    const perceptionStart = Date.now()
+    const perception = await analizarMensaje({
+      mensaje,
+      telefono,
+      tenantId,
+      saveTrace: true
+    })
+    const perceptionLatency = Date.now() - perceptionStart
+
+    // ─── 3. Llamar State Layer ───
+    const stateStart = Date.now()
+    const stateResult = await actualizarEstado({
+      perception,
+      leadId,
+      telefono,
+      contextFlags
+    })
+    const stateLatency = Date.now() - stateStart
+
+    // ─── 4. Construir respuesta enriquecida ───
+    const totalLatency = Date.now() - startTime
+
+    const response = {
+      ok: stateResult.ok,
+      _endpoint_latency_ms: totalLatency,
+      
+      // Resumen humano (lo más útil para debug rápido)
+      summary: {
+        lead_id: leadId,
+        telefono,
+        mensaje,
+        perception_intents: perception.intents,
+        perception_intent_specific: perception.intent_specific,
+        state_before: stateResult.stateBefore 
+          ? `[${stateResult.stateBefore.mode}] stage=${stateResult.stateBefore.stage}`
+          : null,
+        state_after: stateResult.leadState
+          ? describeLeadState(stateResult.leadState)
+          : null,
+        transition_summary: stateResult.transition
+          ? summarizeTransition(stateResult.transition)
+          : null,
+        slots_changed: stateResult.mergeResult?.change_count || 0,
+        latency: {
+          perception_ms: perceptionLatency,
+          state_ms: stateLatency,
+          total_ms: totalLatency
+        }
+      },
+
+      // Datos completos para análisis profundo
+      perception: {
+        intents: perception.intents,
+        intent_specific: perception.intent_specific,
+        conversational_pattern: perception.conversational_pattern,
+        entities: perception.entities,
+        sentiment: perception.sentiment,
+        signals: perception.signals,
+        rationale: perception.rationale,
+        meta: perception.meta,
+        is_fallback: perception._is_fallback || false
+      },
+
+      state: {
+        ok: stateResult.ok,
+        leadState: stateResult.leadState,
+        transition: stateResult.transition,
+        mergeResult: stateResult.mergeResult,
+        stateBefore: stateResult.stateBefore,
+        errors: stateResult.errors,
+        latency_ms: stateResult.latency_ms
+      },
+
+      // Context flags que recibió State Layer
+      context_flags: contextFlags
+    }
+
+    return reply.send(response)
+
+  } catch (err) {
+    console.error('[Debug] State test error:', err)
+    return reply.status(500).send({
+      error: err.message,
+      stack: err.stack?.split('\n').slice(0, 8)
+    })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+// ── Debug — Run Perception Evals (Día 2) ─────────────────────
+// ════════════════════════════════════════════════════════
 app.post('/debug/run-perception-evals', async (req, reply) => {
   const startTime = Date.now()
   const { categoryFilter = null, idFilter = null } = req.body || {}
 
   try {
-    // ─── 1. Cargar dataset ───
     const datasetPath = join(__dirname, '..', 'data', 'evals-peru-exporta-v2.jsonl')
     const fileContent = await readFile(datasetPath, 'utf-8')
     const allEvals = fileContent
@@ -123,7 +261,6 @@ app.post('/debug/run-perception-evals', async (req, reply) => {
       })
       .filter(Boolean)
 
-    // ─── 2. Filtrar evals ejecutables por Perception ───
     let perceptionEvals = allEvals.filter(e => e.expected?.perception_intent)
 
     if (idFilter) {
@@ -143,27 +280,21 @@ app.post('/debug/run-perception-evals', async (req, reply) => {
       return !msg || typeof msg !== 'string' || msg.trim().length === 0
     })
 
-    // ─── 3. Procesar en chunks de 3 paralelo + sleep 1s ───
     const CHUNK_SIZE = 3
     const SLEEP_BETWEEN_CHUNKS_MS = 1000
     const details = []
 
     for (let i = 0; i < ejecutables.length; i += CHUNK_SIZE) {
       const chunk = ejecutables.slice(i, i + CHUNK_SIZE)
-
       const chunkResults = await Promise.all(
         chunk.map(async (evalCase) => runSingleEval(evalCase))
       )
-
       details.push(...chunkResults)
-
-      // Sleep entre chunks (excepto el último)
       if (i + CHUNK_SIZE < ejecutables.length) {
         await sleep(SLEEP_BETWEEN_CHUNKS_MS)
       }
     }
 
-    // ─── 4. Construir reporte ───
     const passed = details.filter(d => d.status === 'passed').length
     const failed = details.filter(d => d.status === 'failed').length
     const errors = details.filter(d => d.status === 'error').length
@@ -228,7 +359,6 @@ app.post('/debug/run-perception-evals', async (req, reply) => {
   }
 })
 
-// ─── Helper: correr 1 eval con retry ───
 async function runSingleEval(evalCase, retryCount = 0) {
   const startTime = Date.now()
   const expectedIntent = evalCase.expected.perception_intent
@@ -241,24 +371,20 @@ async function runSingleEval(evalCase, retryCount = 0) {
       tenantId: 'peru_exporta'
     })
 
-    // Si el output es fallback y tenemos retries disponibles, reintentar
     if (result._is_fallback && retryCount < 1) {
       await sleep(2000)
       return runSingleEval(evalCase, retryCount + 1)
     }
 
-    // Comparar según nivel del expected
     let passed = false
     let diagnosis = null
 
     if (expectedLevel === 'level_1') {
-      // Alto nivel: buscar en intents[]
       passed = result.intents?.includes(expectedIntent)
       if (!passed) {
         diagnosis = `Expected "${expectedIntent}" in intents[], got [${result.intents?.join(', ')}]`
       }
     } else if (expectedLevel === 'level_2') {
-      // Granular: comparar intent_specific exact match
       passed = result.intent_specific === expectedIntent
       if (!passed) {
         if (result.intent_specific === null) {
@@ -268,7 +394,6 @@ async function runSingleEval(evalCase, retryCount = 0) {
         }
       }
     } else if (expectedLevel === 'level_3') {
-      // Patrón conversacional
       passed = result.conversational_pattern?.pattern === expectedIntent
       if (!passed) {
         diagnosis = `Expected conversational_pattern="${expectedIntent}" but got ${
@@ -381,9 +506,9 @@ try {
   await app.listen({ port: PORT, host: HOST })
   console.log(`
 ╔════════════════════════════════════════╗
-║   Hidata — WhatsApp Sales ERP v4.0     ║
+║   Hidata — WhatsApp Sales ERP v20      ║
 ║   Puerto: ${PORT}                          ║
-║   Sprint 4: Prisma models + Bug fixes  ║
+║   Día 3: State Layer + Context Graph   ║
 ╚════════════════════════════════════════╝
   `)
 } catch (error) {
