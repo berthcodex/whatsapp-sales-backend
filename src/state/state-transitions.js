@@ -1,4 +1,4 @@
-// src/state/state-transitions.js — Hidata v20
+// src/state/state-transitions.js — Hidata v20 (Día 5 fix)
 //
 // MOTOR DE TRANSICIONES DETERMINÍSTICO
 //
@@ -9,7 +9,8 @@
 // CERO side effects. CERO BD. CERO API calls.
 // Solo razonamiento determinístico sobre datos en memoria.
 //
-// Esta función la consume state.js que sí escribe en BD.
+// FIX Día 5: rejecting + objecion_* NO pausa el lead (negociación legítima).
+// Solo rejecting puro (sin intent_specific de objeción) pausa.
 
 import {
   STAGES,
@@ -25,23 +26,59 @@ import {
 // ════════════════════════════════════════════════════════
 // PRIORIDADES DE DECISIÓN (en orden)
 // 
-// 1. Mode override por intent crítico (rejecting → PAUSED)
-// 2. Fast-track HOT signals (lead pide llamada en turn 1)
-// 3. Returning lead recognition (lead vuelve después de 30+ días)
-// 4. HUMAN_ACTIVE detection (no aplica en Día 3, va en webhook handler)
-// 5. Stage suggestion del intent + validación de slots
-// 6. Fallback: stay_and_acknowledge (no transicionar)
+// 1. Perception fallback → stay
+// 2. Mode override por intent crítico (rejecting REAL → PAUSED, paid → AUTO_CLOSING)
+// 3. Returning lead recognition
+// 4. Fast-track HOT signals
+// 5. Stage suggestion del intent + slot validation
+// 6. Auto-progression por slots completos
+// 7. Fallback: stay
 // ════════════════════════════════════════════════════════
 
 // ════════════════════════════════════════════════════════
-// INTENT → MODE OVERRIDES
-// Algunos intents fuerzan cambio de mode independiente del stage
+// FUNCIÓN — shouldForceMode()
+// 
+// Decide si un intent debe forzar un mode override.
+// Considera tanto intent (level_1) como intent_specific (level_2).
+//
+// Lógica:
+//   - paid                                  → AUTO_CLOSING (siempre)
+//   - rejecting + intent_specific='objecion_*'   → NO forzar (negociación)
+//   - rejecting + intent_specific='promesa_*'    → NO forzar (postpone)
+//   - rejecting + intent_specific=null            → PAUSED (rechazo real)
+//   - rejecting + cualquier otro intent_specific → NO forzar (caso ambiguo, NO pausar)
+// 
+// Filosofía: en duda, NO pausamos. Mejor seguir conversando que perder ventas.
 // ════════════════════════════════════════════════════════
-const INTENT_FORCES_MODE = {
-  'rejecting': MODES.PAUSED,  // lead explícitamente rechaza → pausar bot
-  'paid':      MODES.AUTO_CLOSING  // lead dice que pagó → modo cierre
-  // NOTA: 'requesting_call' NO fuerza AUTO_CLOSING todavía. 
-  // Lo dejamos en AUTO_CONSULTIVO hasta que tengamos horario confirmado.
+function shouldForceMode(primaryIntent, intentSpecific) {
+  // Caso 1: paid siempre fuerza AUTO_CLOSING
+  if (primaryIntent === 'paid') {
+    return { forced: true, mode: MODES.AUTO_CLOSING, reason: 'paid' }
+  }
+
+  // Caso 2: rejecting requiere análisis del intent_specific
+  if (primaryIntent === 'rejecting') {
+    // Sin intent_specific = rechazo definitivo → pausar
+    if (!intentSpecific) {
+      return { forced: true, mode: MODES.PAUSED, reason: 'rejecting_definitivo' }
+    }
+
+    // Con intent_specific de objeción = negociación legítima → NO pausar
+    if (intentSpecific.startsWith('objecion_')) {
+      return { forced: false, reason: `rejecting_objecion:${intentSpecific}` }
+    }
+
+    // Con intent_specific de promesa diferida = postpone → NO pausar
+    if (intentSpecific.startsWith('promesa_')) {
+      return { forced: false, reason: `rejecting_postpone:${intentSpecific}` }
+    }
+
+    // Cualquier otro intent_specific = caso ambiguo → NO pausar (mejor seguir conversando)
+    return { forced: false, reason: `rejecting_ambiguous:${intentSpecific}` }
+  }
+
+  // Cualquier otro intent: no forzar
+  return { forced: false, reason: 'no_force_needed' }
 }
 
 // ════════════════════════════════════════════════════════
@@ -50,18 +87,6 @@ const INTENT_FORCES_MODE = {
 
 /**
  * Decide el próximo estado según Perception + estado actual.
- * 
- * @param {object} params
- * @param {object} params.perception - Output completo de Perception
- * @param {object} params.currentState - lead_state actual (puede ser null si nuevo)
- * @param {object} params.flags - Flags del contexto (is_returning_lead, etc)
- * @returns {object} {
- *   nextStage: string,
- *   nextMode: string,
- *   transition_reason: string,
- *   slots_to_merge: object,
- *   stayed: boolean
- * }
  */
 export function resolveNextState({ perception, currentState, flags = {} }) {
   // ─── Defaults seguros ───
@@ -86,30 +111,36 @@ export function resolveNextState({ perception, currentState, flags = {} }) {
       nextStage: currentStage,
       nextMode: currentMode,
       transition_reason: 'perception_fallback_stay',
-      slots_to_merge: {},  // no merge si Perception falló
+      slots_to_merge: {},
       stayed: true
     }
   }
 
   // ════════════════════════════════════════════════════════
   // PRIORIDAD 1 — Mode override por intent crítico
+  // FIX Día 5: usar shouldForceMode() que considera intent_specific
   // ════════════════════════════════════════════════════════
   const primaryIntent = intents[0] || 'confused'
-  const forcedMode = INTENT_FORCES_MODE[primaryIntent]
+  const forceCheck = shouldForceMode(primaryIntent, intentSpecific)
 
-  if (forcedMode === MODES.PAUSED) {
+  if (forceCheck.forced) {
     return {
-      nextStage: currentStage,  // mantenemos stage
-      nextMode: MODES.PAUSED,
-      transition_reason: `intent_forces_pause:${primaryIntent}`,
+      nextStage: currentStage,
+      nextMode: forceCheck.mode,
+      transition_reason: `intent_forces_${forceCheck.mode.toLowerCase()}:${forceCheck.reason}`,
       slots_to_merge: slotsToMerge,
       stayed: false
     }
   }
 
+  // Si no se fuerza pero hubo razón documentada, queda en log
+  // (esto ayuda a debug: "por qué rejecting NO pausó")
+  const forceReasonLog = forceCheck.reason !== 'no_force_needed' 
+    ? `force_skipped:${forceCheck.reason}` 
+    : null
+
   // ════════════════════════════════════════════════════════
   // PRIORIDAD 2 — Returning lead recognition
-  // (antes del fast-track porque returning tiene prioridad arquitectónica)
   // ════════════════════════════════════════════════════════
   if (flags.is_returning_lead && currentStage !== STAGES.RETURNING_RECOGNITION) {
     return {
@@ -146,25 +177,22 @@ export function resolveNextState({ perception, currentState, flags = {} }) {
   const suggestedStage = suggestStageFromIntent(primaryIntent)
 
   if (suggestedStage && suggestedStage !== currentStage) {
-    // Verificar que la transición sea permitida
     if (isTransitionAllowed(currentStage, suggestedStage)) {
-      // Verificar que el nuevo stage tenga sus slots requeridos
-      // (consideramos los slots actuales MÁS los nuevos del turno)
       const mergedSlots = { ...slotsFilled, ...slotsToMerge }
       const { canAdvance, missingSlots } = canAdvanceToStage(suggestedStage, mergedSlots)
       
       if (canAdvance) {
-        // Determinar mode según stage destino
         const nextMode = inferModeFromStage(suggestedStage, currentMode)
         return {
           nextStage: suggestedStage,
           nextMode,
-          transition_reason: `intent_suggests:${primaryIntent}`,
+          transition_reason: forceReasonLog
+            ? `intent_suggests:${primaryIntent};${forceReasonLog}`
+            : `intent_suggests:${primaryIntent}`,
           slots_to_merge: slotsToMerge,
           stayed: false
         }
       } else {
-        // Quiere avanzar pero faltan slots → stay y collect
         return {
           nextStage: currentStage,
           nextMode: currentMode,
@@ -174,11 +202,12 @@ export function resolveNextState({ perception, currentState, flags = {} }) {
         }
       }
     } else {
-      // Transición no permitida según matriz
       return {
         nextStage: currentStage,
         nextMode: currentMode,
-        transition_reason: `transition_not_allowed:${currentStage}→${suggestedStage}`,
+        transition_reason: forceReasonLog
+          ? `transition_not_allowed:${currentStage}→${suggestedStage};${forceReasonLog}`
+          : `transition_not_allowed:${currentStage}→${suggestedStage}`,
         slots_to_merge: slotsToMerge,
         stayed: true
       }
@@ -187,8 +216,6 @@ export function resolveNextState({ perception, currentState, flags = {} }) {
 
   // ════════════════════════════════════════════════════════
   // PRIORIDAD 5 — Auto-progression por slots completos
-  // Si estamos en discovery y ya tenemos nombre+producto+empresa+experiencia
-  // → avanzar a presenting aunque el intent no lo sugiera
   // ════════════════════════════════════════════════════════
   const mergedSlots = { ...slotsFilled, ...slotsToMerge }
   const autoAdvanceStage = checkAutoAdvanceByStots(currentStage, mergedSlots)
@@ -205,12 +232,13 @@ export function resolveNextState({ perception, currentState, flags = {} }) {
 
   // ════════════════════════════════════════════════════════
   // FALLBACK — Stay and acknowledge
-  // No hay razón para transicionar, mantenemos todo
   // ════════════════════════════════════════════════════════
   return {
     nextStage: currentStage,
     nextMode: currentMode,
-    transition_reason: 'stay_no_transition_triggered',
+    transition_reason: forceReasonLog
+      ? `stay_no_transition_triggered;${forceReasonLog}`
+      : 'stay_no_transition_triggered',
     slots_to_merge: slotsToMerge,
     stayed: true
   }
@@ -220,10 +248,6 @@ export function resolveNextState({ perception, currentState, flags = {} }) {
 // HELPERS INTERNOS
 // ════════════════════════════════════════════════════════
 
-/**
- * Extrae los slots desde entities de Perception
- * Filtra valores null/undefined/empty para no contaminar el merge
- */
 function extractSlotsFromEntities(entities) {
   if (!entities || typeof entities !== 'object') return {}
   
@@ -237,20 +261,11 @@ function extractSlotsFromEntities(entities) {
   return slots
 }
 
-/**
- * Infiere el mode apropiado según el stage destino
- * 
- * - call_scheduling/confirmed/post_close → AUTO_CLOSING
- * - returning_recognition → AUTO_CONSULTIVO (re-calificar suavemente)
- * - resto → mantener currentMode (típicamente AUTO_CONSULTIVO)
- */
 function inferModeFromStage(stage, currentMode) {
-  // Si ya estamos en HUMAN_ACTIVE o PAUSED, no cambiar automáticamente
   if (currentMode === MODES.HUMAN_ACTIVE || currentMode === MODES.PAUSED) {
     return currentMode
   }
 
-  // Stages de cierre → AUTO_CLOSING
   const CLOSING_STAGES = [
     STAGES.CALL_SCHEDULING,
     STAGES.CALL_CONFIRMED,
@@ -260,45 +275,32 @@ function inferModeFromStage(stage, currentMode) {
     return MODES.AUTO_CLOSING
   }
 
-  // Returning recognition siempre vuelve a consultivo
   if (stage === STAGES.RETURNING_RECOGNITION) {
     return MODES.AUTO_CONSULTIVO
   }
 
-  // Default: mantener mode actual
   return currentMode || MODES.AUTO_CONSULTIVO
 }
 
-/**
- * Detecta si los slots actuales permiten auto-progresión
- * sin esperar intent específico.
- * 
- * Ejemplo: si estamos en discovery y ya tenemos nombre+producto,
- * podemos avanzar a qualifying_empresa.
- */
 function checkAutoAdvanceByStots(currentStage, slots) {
-  // De discovery → qualifying_empresa si ya tenemos básicos
   if (currentStage === STAGES.DISCOVERY) {
     if (slots[SLOTS.NOMBRE] && slots[SLOTS.PRODUCTO]) {
       return STAGES.QUALIFYING_EMPRESA
     }
   }
   
-  // De qualifying_empresa → presenting si ya respondió empresa+experiencia
   if (currentStage === STAGES.QUALIFYING_EMPRESA) {
     if (slots[SLOTS.EMPRESA] !== undefined && slots[SLOTS.EXPERIENCIA] !== undefined) {
       return STAGES.PRESENTING
     }
   }
   
-  // De call_scheduling → call_confirmed si ya tenemos fecha_hora
   if (currentStage === STAGES.CALL_SCHEDULING) {
     if (slots[SLOTS.FECHA_HORA]) {
       return STAGES.CALL_CONFIRMED
     }
   }
   
-  // De call_confirmed → post_close automáticamente
   if (currentStage === STAGES.CALL_CONFIRMED) {
     return STAGES.POST_CLOSE
   }
@@ -310,9 +312,6 @@ function checkAutoAdvanceByStots(currentStage, slots) {
 // HELPER PÚBLICO — para debugging
 // ════════════════════════════════════════════════════════
 
-/**
- * Devuelve resumen humano de la decisión de transición
- */
 export function summarizeTransition(transition) {
   if (!transition) return 'no transition'
   const arrow = transition.stayed ? '↻ stay' : '→'
@@ -322,4 +321,4 @@ export function summarizeTransition(transition) {
 // ════════════════════════════════════════════════════════
 // VERSIÓN PARA TRACKING
 // ════════════════════════════════════════════════════════
-export const STATE_TRANSITIONS_VERSION = 'v1'
+export const STATE_TRANSITIONS_VERSION = 'v2_day5_fix_objection_no_pause'
