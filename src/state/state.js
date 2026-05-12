@@ -1,18 +1,18 @@
-// src/state/state.js — Hidata v20
+// src/state/state.js — Hidata v20 (Día 4)
 //
-// EL CORAZÓN DEL STATE LAYER
-//
-// API principal: actualizarEstado({ perception, turnId, leadId, telefono })
+// EL CORAZÓN DEL STATE LAYER + MODE ROUTER INTEGRATION
 //
 // Pipeline interno:
 //   1. Lee lead_state actual (o crea uno si no existe)
 //   2. Llama resolveNextState() para decidir transición
 //   3. Llama mergeSlots() para actualizar slots
-//   4. Escribe lead_state actualizado (en una transacción)
-//   5. Sincroniza lead.pasoActual y lead.nombreDetectado/productoDetectado
+//   4. Escribe lead_state actualizado (transacción)
+//   5. Sincroniza lead.pasoActual y campos espejo
 //   6. Sincroniza lead.estado SOLO si mode es PAUSED
-//   7. Actualiza turn_trace.stateAfter del turno actual
-//   8. Devuelve { leadState, transition, mergeResult }
+//   7. [NEW Día 4] Llama Mode Router para evaluar guards operacionales
+//   8. [NEW Día 4] Si Mode Router escaló el mode, persiste el cambio
+//   9. Actualiza turn_trace.stateAfter + modeRouterDecision
+//   10. Devuelve { leadState, transition, mergeResult, modeRouterDecision }
 //
 // NUNCA crashea — si algo falla, devuelve estado original sin cambios
 
@@ -29,39 +29,21 @@ import {
   describeLeadState,
   STATE_DEFINITIONS_VERSION
 } from './stage-definitions.js'
+import { decideMode, summarizeModeDecision, MODE_ROUTER_VERSION } from '../routing/mode-router.js'
 
 // ════════════════════════════════════════════════════════
 // API PRINCIPAL — actualizarEstado()
 // ════════════════════════════════════════════════════════
 
-/**
- * Actualiza el estado completo del lead después de Perception.
- * 
- * @param {object} params
- * @param {object} params.perception - Output de Perception (con meta.turn_id)
- * @param {number} params.leadId - ID del lead
- * @param {string} params.telefono - Teléfono del lead (para logging)
- * @param {object} params.contextFlags - Flags del contexto (is_returning_lead, etc)
- * @returns {object} {
- *   ok: boolean,
- *   leadState: object,
- *   transition: object,
- *   mergeResult: object,
- *   errors: array
- * }
- */
 export async function actualizarEstado({ perception, leadId, telefono, contextFlags = {} }) {
   const startTime = Date.now()
   const errors = []
 
-  // Validación defensiva
   if (!leadId) {
     return {
       ok: false,
       errors: [{ phase: 'validation', message: 'leadId is required' }],
-      leadState: null,
-      transition: null,
-      mergeResult: null
+      leadState: null, transition: null, mergeResult: null, modeRouterDecision: null
     }
   }
 
@@ -69,9 +51,7 @@ export async function actualizarEstado({ perception, leadId, telefono, contextFl
     return {
       ok: false,
       errors: [{ phase: 'validation', message: 'perception is required' }],
-      leadState: null,
-      transition: null,
-      mergeResult: null
+      leadState: null, transition: null, mergeResult: null, modeRouterDecision: null
     }
   }
 
@@ -93,17 +73,15 @@ export async function actualizarEstado({ perception, leadId, telefono, contextFl
       sanitizeSlots(transition.slots_to_merge || {})
     )
 
-    // ─── 4. Construir el lead_state actualizado ───
+    // ─── 4. Construir lead_state actualizado ───
     const updates = buildLeadStateUpdates({
-      transition,
-      mergeResult,
-      currentLeadState,
-      contextFlags
+      transition, mergeResult, currentLeadState, contextFlags
     })
 
-    // ─── 5. Escribir lead_state, lead y turn_trace en una transacción ───
-    const updatedLeadState = await prisma.$transaction(async (tx) => {
-      // Update lead_state
+    // ─── 5. Escribir lead_state, lead y turn_trace en transacción ───
+    let updatedLeadState
+    
+    updatedLeadState = await prisma.$transaction(async (tx) => {
       const newLeadState = await tx.leadState.update({
         where: { leadId },
         data: updates
@@ -121,43 +99,120 @@ export async function actualizarEstado({ perception, leadId, telefono, contextFl
         })
       }
 
-      // Actualizar turn_trace.stateAfter (si tenemos turn_id)
-      const turnId = perception?.meta?.turn_id
-      if (turnId) {
-        const stateAfter = serializeStateAfter({
-          newLeadState,
-          transition,
-          mergeResult
-        })
-
-        await tx.turnTrace.update({
-          where: { turnId },
-          data: { stateAfter }
-        }).catch(err => {
-          console.error('[State] Error updating turn_trace:', err.message)
-          errors.push({ phase: 'update_trace', message: err.message })
-        })
-      }
-
+      // turn_trace.stateAfter (PARCIAL — falta modeRouterDecision)
+      // Lo actualizamos después de Mode Router
+      
       return newLeadState
     })
+
+    // ════════════════════════════════════════════════════════
+    // ─── 6. [NEW Día 4] Llamar Mode Router ───
+    // ════════════════════════════════════════════════════════
+    let modeRouterDecision = null
+    let finalLeadState = updatedLeadState
+    
+    try {
+      // Cargar contexto operacional para el router
+      const [tenantSettings, vendorActivo] = await Promise.all([
+        loadTenantSettings(perception?.meta?.tenant_id || 'peru_exporta'),
+        loadVendorActivo(updatedLeadState.vendorActiveId)
+      ])
+
+      // Llamar al router (función pura)
+      modeRouterDecision = decideMode({
+        leadState: updatedLeadState,
+        perception,
+        context: contextFlags,
+        tenantSettings,
+        vendorActivo
+      })
+
+      // ─── 7. Si Mode Router escaló el mode, persistir el cambio ───
+      if (modeRouterDecision.decision.overrode_state) {
+        const newMode = modeRouterDecision.decision.final_mode
+        
+        // Verificar que el nuevo mode requiere sync de lead.estado
+        const newEstado = MODE_TO_LEAD_ESTADO[newMode]
+        const additionalLeadUpdates = {}
+        if (newEstado !== null && newEstado !== undefined) {
+          additionalLeadUpdates.estado = newEstado
+        }
+
+        finalLeadState = await prisma.$transaction(async (tx) => {
+          // Update lead_state con nuevo mode
+          const updatedAgain = await tx.leadState.update({
+            where: { leadId },
+            data: {
+              currentMode: newMode,
+              modeEnteredAt: new Date()
+            }
+          })
+
+          // Sync lead.estado si es necesario
+          if (Object.keys(additionalLeadUpdates).length > 0) {
+            await tx.lead.update({
+              where: { id: leadId },
+              data: additionalLeadUpdates
+            }).catch(err => {
+              console.error('[State] Error syncing lead after router:', err.message)
+              errors.push({ phase: 'sync_lead_after_router', message: err.message })
+            })
+          }
+
+          return updatedAgain
+        })
+
+        console.log(`[State] Mode Router escaló: ${summarizeModeDecision(modeRouterDecision)}`)
+      }
+
+    } catch (err) {
+      console.error('[State] Mode Router failed:', err.message)
+      errors.push({ phase: 'mode_router', message: err.message })
+      // No bloqueante — seguimos con el mode que State Layer decidió
+    }
+
+    // ════════════════════════════════════════════════════════
+    // ─── 8. Actualizar turn_trace.stateAfter + modeRouterDecision ───
+    // ════════════════════════════════════════════════════════
+    const turnId = perception?.meta?.turn_id
+    if (turnId) {
+      const stateAfter = serializeStateAfter({
+        newLeadState: finalLeadState,
+        transition,
+        mergeResult,
+        modeRouterDecision
+      })
+
+      await prisma.turnTrace.update({
+        where: { turnId },
+        data: {
+          stateAfter,
+          modeRouterDecision: modeRouterDecision || {}
+        }
+      }).catch(err => {
+        console.error('[State] Error updating turn_trace:', err.message)
+        errors.push({ phase: 'update_trace', message: err.message })
+      })
+    }
 
     const latencyMs = Date.now() - startTime
     
     // Log resumen para debugging
     console.log(
       `[State] ${telefono || `lead_${leadId}`} | ` +
-      `${describeLeadState(currentLeadState)} → ${describeLeadState(updatedLeadState)} | ` +
+      `${describeLeadState(currentLeadState)} → ${describeLeadState(finalLeadState)} | ` +
       `${transition.transition_reason} | ` +
       `${summarizeMerge(mergeResult)} | ` +
+      `router: ${modeRouterDecision ? summarizeModeDecision(modeRouterDecision) : 'skipped'} | ` +
       `${latencyMs}ms`
     )
 
     return {
       ok: true,
-      leadState: updatedLeadState,
+      leadState: finalLeadState,
       transition,
       mergeResult,
+      modeRouterDecision,
       errors,
       latency_ms: latencyMs,
       stateBefore
@@ -173,8 +228,43 @@ export async function actualizarEstado({ perception, leadId, telefono, contextFl
       leadState: null,
       transition: null,
       mergeResult: null,
+      modeRouterDecision: null,
       latency_ms: Date.now() - startTime
     }
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// LOADERS — para Mode Router
+// ════════════════════════════════════════════════════════
+
+/**
+ * Carga tenant_settings del tenant del lead
+ */
+async function loadTenantSettings(tenantId) {
+  try {
+    return await prisma.tenantSettings.findUnique({
+      where: { tenantId }
+    })
+  } catch (err) {
+    console.error('[State] Error loading tenantSettings:', err.message)
+    return null
+  }
+}
+
+/**
+ * Carga el vendor activo del lead
+ */
+async function loadVendorActivo(vendorId) {
+  if (!vendorId) return null
+  try {
+    return await prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { id: true, nombre: true, activo: true, instanciaEvolution: true, whatsappNumber: true }
+    })
+  } catch (err) {
+    console.error('[State] Error loading vendor:', err.message)
+    return null
   }
 }
 
@@ -182,10 +272,6 @@ export async function actualizarEstado({ perception, leadId, telefono, contextFl
 // getOrCreateLeadState — manejar leads sin lead_state previo
 // ════════════════════════════════════════════════════════
 
-/**
- * Lee el lead_state. Si no existe, lo crea con defaults.
- * Necesario porque leads creados por v19 no tienen lead_state.
- */
 async function getOrCreateLeadState(leadId) {
   const existing = await prisma.leadState.findUnique({
     where: { leadId }
@@ -193,10 +279,8 @@ async function getOrCreateLeadState(leadId) {
 
   if (existing) return existing
 
-  // No existe → crear con defaults
   console.log(`[State] Creating lead_state for lead ${leadId} (first time)`)
   
-  // Intentar inferir desde lead.estado v19 si existe
   const lead = await prisma.lead.findUnique({
     where: { id: leadId },
     select: { estado: true, pasoActual: true, nombreDetectado: true, productoDetectado: true, vendorId: true }
@@ -227,15 +311,10 @@ async function getOrCreateLeadState(leadId) {
   return newLeadState
 }
 
-/**
- * Mapea lead.estado/pasoActual de v19 al stage v20 equivalente
- */
 function inferStageFromV19({ estado, pasoActual }) {
-  // Si v19 marcó CERRADO o PAGO_PENDIENTE, ya pasamos al final
   if (estado === 'CERRADO') return STAGES.POST_CLOSE
   if (estado === 'PAGO_PENDIENTE') return STAGES.POST_CLOSE
 
-  // Mapeo desde pasoActual
   const PASO_TO_STAGE = {
     1: STAGES.FIRST_CONTACT,
     2: STAGES.DISCOVERY,
@@ -253,27 +332,21 @@ function inferStageFromV19({ estado, pasoActual }) {
 // CONSTRUCCIÓN DE UPDATES
 // ════════════════════════════════════════════════════════
 
-/**
- * Construye el objeto de updates para lead_state
- */
 function buildLeadStateUpdates({ transition, mergeResult, currentLeadState, contextFlags }) {
   const updates = {
     lastMessageAt: new Date(),
     slotsFilled: mergeResult.merged
   }
 
-  // Solo actualizar stage si cambió
   if (transition.nextStage !== currentLeadState.currentStage) {
     updates.currentStage = transition.nextStage
   }
 
-  // Solo actualizar mode si cambió
   if (transition.nextMode !== currentLeadState.currentMode) {
     updates.currentMode = transition.nextMode
     updates.modeEnteredAt = new Date()
   }
 
-  // Returning lead flag
   if (contextFlags.is_returning_lead && !currentLeadState.returningLeadFlag) {
     updates.returningLeadFlag = true
   }
@@ -281,33 +354,25 @@ function buildLeadStateUpdates({ transition, mergeResult, currentLeadState, cont
   return updates
 }
 
-/**
- * Construye el objeto de updates para sincronizar con lead (campo v19)
- * Solo actualiza lo necesario para mantener compatibilidad
- */
 function buildLeadSyncUpdates({ transition, mergeResult }) {
   const updates = {}
 
-  // Sincronizar pasoActual (siempre que el stage haya cambiado)
   const nextPasoActual = STAGE_TO_PASO_ACTUAL[transition.nextStage]
   if (nextPasoActual) {
     updates.pasoActual = nextPasoActual
   }
 
-  // Sincronizar lead.estado SOLO si el mode lo requiere
   const newEstado = MODE_TO_LEAD_ESTADO[transition.nextMode]
   if (newEstado !== null && newEstado !== undefined) {
     updates.estado = newEstado
   }
 
-  // Sincronizar campos espejo (nombre y producto)
   for (const [slotKey, leadColumn] of Object.entries(SLOT_TO_LEAD_COLUMN)) {
     if (mergeResult.changes[slotKey]) {
       updates[leadColumn] = mergeResult.changes[slotKey].new
     }
   }
 
-  // Actualizar timestamp del último mensaje del lead
   updates.ultimoMensaje = new Date()
 
   return updates
@@ -317,9 +382,6 @@ function buildLeadSyncUpdates({ transition, mergeResult }) {
 // SERIALIZACIÓN para turn_trace
 // ════════════════════════════════════════════════════════
 
-/**
- * Snapshot del estado ANTES de actualizar (para turn_trace.stateBefore)
- */
 function serializeStateBefore(leadState) {
   return {
     mode: leadState.currentMode,
@@ -330,18 +392,13 @@ function serializeStateBefore(leadState) {
   }
 }
 
-/**
- * Snapshot del estado DESPUÉS de actualizar (para turn_trace.stateAfter)
- * Incluye también la transición y el merge result
- */
-function serializeStateAfter({ newLeadState, transition, mergeResult }) {
+function serializeStateAfter({ newLeadState, transition, mergeResult, modeRouterDecision }) {
   return {
     mode: newLeadState.currentMode,
     stage: newLeadState.currentStage,
     slots_filled: newLeadState.slotsFilled,
     returning_lead_flag: newLeadState.returningLeadFlag,
     
-    // Metadata de la decisión
     transition: {
       from_stage: transition.stayed ? newLeadState.currentStage : 'previous',
       to_stage: transition.nextStage,
@@ -351,17 +408,24 @@ function serializeStateAfter({ newLeadState, transition, mergeResult }) {
       stayed: transition.stayed
     },
     
-    // Metadata del merge
     merge: {
       change_count: mergeResult.change_count,
       changes: mergeResult.changes
     },
     
-    // Versiones para tracking
+    // Día 4: agregamos resumen del router en stateAfter para facilitar debug
+    router_summary: modeRouterDecision ? {
+      overrode_state: modeRouterDecision.decision.overrode_state,
+      final_mode: modeRouterDecision.decision.final_mode,
+      reason: modeRouterDecision.decision.reason,
+      guards_triggered: modeRouterDecision.guards_triggered
+    } : null,
+    
     versions: {
       definitions: STATE_DEFINITIONS_VERSION,
       transitions: STATE_TRANSITIONS_VERSION,
-      context_graph: CONTEXT_GRAPH_VERSION
+      context_graph: CONTEXT_GRAPH_VERSION,
+      mode_router: MODE_ROUTER_VERSION
     }
   }
 }
@@ -369,4 +433,4 @@ function serializeStateAfter({ newLeadState, transition, mergeResult }) {
 // ════════════════════════════════════════════════════════
 // VERSIÓN PARA TRACKING
 // ════════════════════════════════════════════════════════
-export const STATE_VERSION = 'v1'
+export const STATE_VERSION = 'v2_day4'
