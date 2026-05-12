@@ -124,8 +124,11 @@ function applyMergePolicy(policy, currentValue, newValue) {
       }
       return { shouldUpdate: false, reason: 'overwrite_same_value' }
 
-    case 'always_overwrite':
-      // Siempre actualiza si el nuevo valor no es vacío
+ case 'always_overwrite':
+      // Actualiza solo si el valor realmente cambia
+      if (currentValue === newValue) {
+        return { shouldUpdate: false, reason: 'always_overwrite_same_value' }
+      }
       return { shouldUpdate: true, reason: 'always_overwrite' }
 
     default:
