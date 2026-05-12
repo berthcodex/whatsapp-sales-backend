@@ -1,5 +1,5 @@
 // src/server.js — Hidata v20
-// Día 4: + Endpoint /debug/mode-test (con simulación de guards)
+// Día 5: + Endpoint /debug/policy-test
 
 import 'dotenv/config'
 import { readFile } from 'node:fs/promises'
@@ -30,6 +30,7 @@ import { actualizarEstado } from './state/state.js'
 import { summarizeTransition } from './state/state-transitions.js'
 import { describeLeadState } from './state/stage-definitions.js'
 import { decideMode, summarizeModeDecision, isValidEscalation } from './routing/mode-router.js'
+import { summarizeFullPolicyDecision } from './policy/policy.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -52,7 +53,7 @@ await app.register(cors, {
 app.get('/health', async () => ({
   status: 'ok',
   service: 'Hidata — WhatsApp Sales ERP',
-  version: '4.0.0',
+  version: '5.0.0',
   timestamp: new Date().toISOString()
 }))
 
@@ -168,6 +169,9 @@ app.post('/debug/state-test', async (req, reply) => {
         mode_router_summary: stateResult.modeRouterDecision
           ? summarizeModeDecision(stateResult.modeRouterDecision)
           : null,
+        policy_summary: stateResult.policyDecision
+          ? summarizeFullPolicyDecision(stateResult.policyDecision)
+          : null,
         slots_changed: stateResult.mergeResult?.change_count || 0,
         latency: {
           perception_ms: perceptionLatency,
@@ -192,6 +196,7 @@ app.post('/debug/state-test', async (req, reply) => {
         transition: stateResult.transition,
         mergeResult: stateResult.mergeResult,
         modeRouterDecision: stateResult.modeRouterDecision,
+        policyDecision: stateResult.policyDecision,
         stateBefore: stateResult.stateBefore,
         errors: stateResult.errors,
         latency_ms: stateResult.latency_ms
@@ -208,23 +213,9 @@ app.post('/debug/state-test', async (req, reply) => {
   }
 })
 
-// ════════════════════════════════════════════════════════════════
-// ── Debug — Mode Router test (Día 4) ─────────────────────────────
-// Pipeline completo: Perception → State → ModeRouter
-// 
-// Body normal (con datos reales de BD):
-//   { mensaje: string, telefono: string }
-//
-// Body con simulación (override tenant/vendor para probar guards):
-//   { 
-//     mensaje: string, 
-//     telefono: string, 
-//     simulate: {
-//       tenantSettings: { estadoSuscripcion: 'past_due', turnosConsumidosMesActual: 10500, ... },
-//       vendorActivo: { activo: false }
-//     }
-//   }
-// ════════════════════════════════════════════════════════════════
+// ────────────────────────────────────────────────────────────
+// ── Debug — Mode Router test (Día 4) ─────────────────────────
+// ────────────────────────────────────────────────────────────
 app.post('/debug/mode-test', async (req, reply) => {
   const startTime = Date.now()
   const { mensaje, telefono, tenantId = 'peru_exporta', simulate = null } = req.body || {}
@@ -253,7 +244,6 @@ app.post('/debug/mode-test', async (req, reply) => {
   }
 
   try {
-    // ─── 1. Construir contexto ───
     const builtContext = await buildPerceptionContext({ telefono, mensaje, tenantId })
     const leadId = builtContext.contexto.lead_id
     const contextFlags = builtContext.contexto.flags
@@ -265,9 +255,7 @@ app.post('/debug/mode-test', async (req, reply) => {
       })
     }
 
-    // ─── 2. Si HAY simulación, usar pipeline mockeado ───
     if (simulate) {
-      // Cargar lead_state actual para no escribir nada
       const currentLeadState = await prisma.leadState.findUnique({ where: { leadId } })
       
       if (!currentLeadState) {
@@ -277,12 +265,10 @@ app.post('/debug/mode-test', async (req, reply) => {
         })
       }
 
-      // Llamar Perception (sin guardar trace para no contaminar)
       const perception = await analizarMensaje({
         mensaje, telefono, tenantId, saveTrace: false
       })
 
-      // Llamar Mode Router con los datos SIMULADOS
       const modeRouterDecision = decideMode({
         leadState: currentLeadState,
         perception,
@@ -291,7 +277,6 @@ app.post('/debug/mode-test', async (req, reply) => {
         vendorActivo: simulate.vendorActivo || null
       })
 
-      // Validar si la transición sería válida
       const escalationValid = isValidEscalation(
         currentLeadState.currentMode,
         modeRouterDecision.decision.final_mode
@@ -301,7 +286,6 @@ app.post('/debug/mode-test', async (req, reply) => {
         ok: true,
         _mode: 'simulated',
         _endpoint_latency_ms: Date.now() - startTime,
-        
         summary: {
           lead_id: leadId,
           telefono,
@@ -310,29 +294,24 @@ app.post('/debug/mode-test', async (req, reply) => {
           escalation_valid: escalationValid,
           state_unchanged: 'simulation does not persist any change'
         },
-
         simulation_inputs: {
           tenantSettings: simulate.tenantSettings,
           vendorActivo: simulate.vendorActivo
         },
-
         perception_summary: {
           intents: perception.intents,
           intent_specific: perception.intent_specific,
           temperature: perception.sentiment?.temperature
         },
-
         leadState_used: {
           currentMode: currentLeadState.currentMode,
           currentStage: currentLeadState.currentStage,
           slotsFilled: currentLeadState.slotsFilled
         },
-
         mode_router_decision: modeRouterDecision
       })
     }
 
-    // ─── 3. Si NO hay simulación, pipeline normal completo ───
     const perceptionStart = Date.now()
     const perception = await analizarMensaje({
       mensaje, telefono, tenantId, saveTrace: true
@@ -351,7 +330,6 @@ app.post('/debug/mode-test', async (req, reply) => {
       ok: stateResult.ok,
       _mode: 'real',
       _endpoint_latency_ms: totalLatency,
-      
       summary: {
         lead_id: leadId,
         telefono,
@@ -373,13 +351,11 @@ app.post('/debug/mode-test', async (req, reply) => {
           total_ms: totalLatency
         }
       },
-
       perception_summary: {
         intents: perception.intents,
         intent_specific: perception.intent_specific,
         temperature: perception.sentiment?.temperature
       },
-
       state: {
         ok: stateResult.ok,
         leadState: stateResult.leadState,
@@ -387,12 +363,156 @@ app.post('/debug/mode-test', async (req, reply) => {
         modeRouterDecision: stateResult.modeRouterDecision,
         errors: stateResult.errors
       },
-
       context_flags: contextFlags
     })
 
   } catch (err) {
     console.error('[Debug] Mode test error:', err)
+    return reply.status(500).send({
+      error: err.message,
+      stack: err.stack?.split('\n').slice(0, 8)
+    })
+  }
+})
+
+// ════════════════════════════════════════════════════════════════
+// ── Debug — Policy Layer test (Día 5) ────────────────────────────
+// Pipeline completo: Perception → State → ModeRouter → Policy
+// 
+// Body:
+//   { mensaje: string, telefono: string }
+//
+// Devuelve TODO el trace de Policy:
+//   - acción decidida + estrategia
+//   - guardrails evaluados/bloqueados
+//   - decision_path completo
+//   - pool inicial vs filtrado
+// ════════════════════════════════════════════════════════════════
+app.post('/debug/policy-test', async (req, reply) => {
+  const startTime = Date.now()
+  const { mensaje, telefono, tenantId = 'peru_exporta' } = req.body || {}
+
+  if (!mensaje || !telefono) {
+    return reply.status(400).send({
+      error: 'Body must include both "mensaje" and "telefono"',
+      example: {
+        mensaje: 'esta caro pe, mucha plata',
+        telefono: '51938188585'
+      }
+    })
+  }
+
+  try {
+    // ─── 1. Construir contexto ───
+    const builtContext = await buildPerceptionContext({ telefono, mensaje, tenantId })
+    const leadId = builtContext.contexto.lead_id
+    const contextFlags = builtContext.contexto.flags
+
+    if (!leadId) {
+      return reply.status(404).send({
+        error: 'Lead does not exist.',
+        telefono
+      })
+    }
+
+    // ─── 2. Pipeline completo Perception → State → ModeRouter → Policy ───
+    const perceptionStart = Date.now()
+    const perception = await analizarMensaje({
+      mensaje, telefono, tenantId, saveTrace: true
+    })
+    const perceptionLatency = Date.now() - perceptionStart
+
+    const stateStart = Date.now()
+    const stateResult = await actualizarEstado({
+      perception, leadId, telefono, contextFlags
+    })
+    const stateLatency = Date.now() - stateStart
+
+    const totalLatency = Date.now() - startTime
+
+    // ─── 3. Construir respuesta enriquecida con foco en Policy ───
+    const policyDecision = stateResult.policyDecision
+
+    return reply.send({
+      ok: stateResult.ok,
+      _endpoint_latency_ms: totalLatency,
+
+      // ─── Resumen ejecutivo ───
+      summary: {
+        lead_id: leadId,
+        telefono,
+        mensaje,
+        
+        // Perception
+        intents: perception.intents,
+        intent_specific: perception.intent_specific,
+        conversational_pattern: perception.conversational_pattern?.pattern,
+        
+        // State
+        state_before: stateResult.stateBefore
+          ? `[${stateResult.stateBefore.mode}] stage=${stateResult.stateBefore.stage}`
+          : null,
+        state_after: stateResult.leadState
+          ? describeLeadState(stateResult.leadState)
+          : null,
+        
+        // Mode Router
+        mode_router_summary: stateResult.modeRouterDecision
+          ? summarizeModeDecision(stateResult.modeRouterDecision)
+          : null,
+
+        // ⭐ Policy (lo principal de este endpoint)
+        policy_summary: policyDecision
+          ? summarizeFullPolicyDecision(policyDecision)
+          : 'policy not executed',
+        action_type: policyDecision?.action?.type || null,
+        action_strategy: policyDecision?.action?.strategy || null,
+        bot_should_respond: policyDecision?.action?.bot_should_respond ?? null,
+        rule_matched: policyDecision?.rule_matched || null,
+        guardrails_blocking: policyDecision?.guardrails?.blocking_names || [],
+        
+        latency: {
+          perception_ms: perceptionLatency,
+          state_ms: stateLatency,
+          total_ms: totalLatency
+        }
+      },
+
+      // ─── Policy completo (audit trail) ───
+      policy: policyDecision ? {
+        action: policyDecision.action,
+        guardrails: policyDecision.guardrails,
+        rule_matched: policyDecision.rule_matched,
+        decision_path: policyDecision.decision_path,
+        candidates: policyDecision.candidates,
+        input_snapshot: policyDecision.input_snapshot,
+        meta: policyDecision.meta,
+        ok: policyDecision.ok,
+        errors: policyDecision.errors
+      } : null,
+
+      // ─── Datos de soporte ───
+      perception_summary: {
+        intents: perception.intents,
+        intent_specific: perception.intent_specific,
+        pattern: perception.conversational_pattern?.pattern,
+        entities: perception.entities,
+        temperature: perception.sentiment?.temperature
+      },
+
+      state_summary: {
+        ok: stateResult.ok,
+        currentStage: stateResult.leadState?.currentStage,
+        currentMode: stateResult.leadState?.currentMode,
+        slotsFilled: stateResult.leadState?.slotsFilled,
+        transition_reason: stateResult.transition?.transition_reason
+      },
+
+      context_flags: contextFlags
+    })
+
+  } catch (err) {
+    console.error('[Debug] Policy test error:', err)
     return reply.status(500).send({
       error: err.message,
       stack: err.stack?.split('\n').slice(0, 8)
@@ -590,7 +710,7 @@ app.post('/auth/login',   async (req, reply) => loginVendor(req, reply, prisma))
 
 // ── Webhook ──────────────────────────────────────────────────
 app.post('/webhook', async (req, reply) => handleWebhook(req, reply, prisma))
-app.get('/webhook',  async () => ({ status: 'webhook activo', version: '4.0.0' }))
+app.get('/webhook',  async () => ({ status: 'webhook activo', version: '5.0.0' }))
 
 // ── Leads ────────────────────────────────────────────────────
 app.get('/leads',                async (req, reply) => getLeads(req, reply, prisma))
@@ -655,7 +775,7 @@ try {
 ╔════════════════════════════════════════╗
 ║   Hidata — WhatsApp Sales ERP v20      ║
 ║   Puerto: ${PORT}                          ║
-║   Día 4: + Mode Router                 ║
+║   Día 5: + Policy Layer                ║
 ╚════════════════════════════════════════╝
   `)
 } catch (error) {
