@@ -227,7 +227,8 @@ function buildSilenceResponse({ reason, actionType = null, context = null, start
 // ════════════════════════════════════════════════════════
 
 function buildBotResponse({ result, actionType, strategy, responseStrategy, context, startTime }) {
-  const success = result?.ok === true && result?.text
+  // FIX: convertir explícitamente a boolean para evitar que JS devuelva el string del texto
+  const success = Boolean(result?.ok === true && result?.text)
 
   return {
     ok: success,
