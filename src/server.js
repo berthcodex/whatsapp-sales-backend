@@ -1,5 +1,5 @@
 // src/server.js — Hidata v20
-// Día 5: + Endpoint /debug/policy-test
+// Día 6: + Endpoint /debug/response-test
 
 import 'dotenv/config'
 import { readFile } from 'node:fs/promises'
@@ -31,6 +31,7 @@ import { summarizeTransition } from './state/state-transitions.js'
 import { describeLeadState } from './state/stage-definitions.js'
 import { decideMode, summarizeModeDecision, isValidEscalation } from './routing/mode-router.js'
 import { summarizeFullPolicyDecision } from './policy/policy.js'
+import { summarizeBotResponse } from './response/response.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -53,7 +54,7 @@ await app.register(cors, {
 app.get('/health', async () => ({
   status: 'ok',
   service: 'Hidata — WhatsApp Sales ERP',
-  version: '5.0.0',
+  version: '6.0.0',
   timestamp: new Date().toISOString()
 }))
 
@@ -138,6 +139,8 @@ app.post('/debug/state-test', async (req, reply) => {
     const perception = await analizarMensaje({
       mensaje, telefono, tenantId, saveTrace: true
     })
+    perception.meta = perception.meta || {}
+    perception.meta.mensaje_original = mensaje
     const perceptionLatency = Date.now() - perceptionStart
 
     const stateStart = Date.now()
@@ -172,6 +175,10 @@ app.post('/debug/state-test', async (req, reply) => {
         policy_summary: stateResult.policyDecision
           ? summarizeFullPolicyDecision(stateResult.policyDecision)
           : null,
+        response_summary: stateResult.botResponse
+          ? summarizeBotResponse(stateResult.botResponse)
+          : null,
+        bot_text: stateResult.botResponse?.text || null,
         slots_changed: stateResult.mergeResult?.change_count || 0,
         latency: {
           perception_ms: perceptionLatency,
@@ -197,6 +204,7 @@ app.post('/debug/state-test', async (req, reply) => {
         mergeResult: stateResult.mergeResult,
         modeRouterDecision: stateResult.modeRouterDecision,
         policyDecision: stateResult.policyDecision,
+        botResponse: stateResult.botResponse,
         stateBefore: stateResult.stateBefore,
         errors: stateResult.errors,
         latency_ms: stateResult.latency_ms
@@ -231,12 +239,7 @@ app.post('/debug/mode-test', async (req, reply) => {
         mensaje: 'Hola, soy Juan',
         telefono: '51938188585',
         simulate: {
-          tenantSettings: {
-            estadoSuscripcion: 'past_due',
-            turnosConsumidosMesActual: 10500,
-            turnosIncluidosPorVendedorMes: 10000,
-            numVendedoresPagados: 1
-          },
+          tenantSettings: { estadoSuscripcion: 'past_due', turnosConsumidosMesActual: 10500, turnosIncluidosPorVendedorMes: 10000, numVendedoresPagados: 1 },
           vendorActivo: { id: 1, activo: false, nombre: 'Joan' }
         }
       }
@@ -249,25 +252,19 @@ app.post('/debug/mode-test', async (req, reply) => {
     const contextFlags = builtContext.contexto.flags
 
     if (!leadId) {
-      return reply.status(404).send({
-        error: 'Lead does not exist.',
-        telefono
-      })
+      return reply.status(404).send({ error: 'Lead does not exist.', telefono })
     }
 
     if (simulate) {
       const currentLeadState = await prisma.leadState.findUnique({ where: { leadId } })
-      
       if (!currentLeadState) {
         return reply.status(404).send({
-          error: 'lead_state does not exist for this lead. Use /debug/state-test first.',
+          error: 'lead_state does not exist. Use /debug/state-test first.',
           telefono, leadId
         })
       }
 
-      const perception = await analizarMensaje({
-        mensaje, telefono, tenantId, saveTrace: false
-      })
+      const perception = await analizarMensaje({ mensaje, telefono, tenantId, saveTrace: false })
 
       const modeRouterDecision = decideMode({
         leadState: currentLeadState,
@@ -294,10 +291,7 @@ app.post('/debug/mode-test', async (req, reply) => {
           escalation_valid: escalationValid,
           state_unchanged: 'simulation does not persist any change'
         },
-        simulation_inputs: {
-          tenantSettings: simulate.tenantSettings,
-          vendorActivo: simulate.vendorActivo
-        },
+        simulation_inputs: { tenantSettings: simulate.tenantSettings, vendorActivo: simulate.vendorActivo },
         perception_summary: {
           intents: perception.intents,
           intent_specific: perception.intent_specific,
@@ -313,15 +307,13 @@ app.post('/debug/mode-test', async (req, reply) => {
     }
 
     const perceptionStart = Date.now()
-    const perception = await analizarMensaje({
-      mensaje, telefono, tenantId, saveTrace: true
-    })
+    const perception = await analizarMensaje({ mensaje, telefono, tenantId, saveTrace: true })
+    perception.meta = perception.meta || {}
+    perception.meta.mensaje_original = mensaje
     const perceptionLatency = Date.now() - perceptionStart
 
     const stateStart = Date.now()
-    const stateResult = await actualizarEstado({
-      perception, leadId, telefono, contextFlags
-    })
+    const stateResult = await actualizarEstado({ perception, leadId, telefono, contextFlags })
     const stateLatency = Date.now() - stateStart
 
     const totalLatency = Date.now() - startTime
@@ -334,61 +326,128 @@ app.post('/debug/mode-test', async (req, reply) => {
         lead_id: leadId,
         telefono,
         mensaje,
-        state_before: stateResult.stateBefore
-          ? `[${stateResult.stateBefore.mode}] stage=${stateResult.stateBefore.stage}`
-          : null,
-        state_after: stateResult.leadState
-          ? describeLeadState(stateResult.leadState)
-          : null,
-        mode_router_summary: stateResult.modeRouterDecision
-          ? summarizeModeDecision(stateResult.modeRouterDecision)
-          : 'router not executed',
+        state_before: stateResult.stateBefore ? `[${stateResult.stateBefore.mode}] stage=${stateResult.stateBefore.stage}` : null,
+        state_after: stateResult.leadState ? describeLeadState(stateResult.leadState) : null,
+        mode_router_summary: stateResult.modeRouterDecision ? summarizeModeDecision(stateResult.modeRouterDecision) : 'router not executed',
         mode_router_overrode_state: stateResult.modeRouterDecision?.decision?.overrode_state || false,
         guards_triggered: stateResult.modeRouterDecision?.guards_triggered || [],
-        latency: {
-          perception_ms: perceptionLatency,
-          state_ms: stateLatency,
-          total_ms: totalLatency
-        }
+        latency: { perception_ms: perceptionLatency, state_ms: stateLatency, total_ms: totalLatency }
       },
-      perception_summary: {
-        intents: perception.intents,
-        intent_specific: perception.intent_specific,
-        temperature: perception.sentiment?.temperature
-      },
-      state: {
-        ok: stateResult.ok,
-        leadState: stateResult.leadState,
-        transition: stateResult.transition,
-        modeRouterDecision: stateResult.modeRouterDecision,
-        errors: stateResult.errors
-      },
+      perception_summary: { intents: perception.intents, intent_specific: perception.intent_specific, temperature: perception.sentiment?.temperature },
+      state: { ok: stateResult.ok, leadState: stateResult.leadState, transition: stateResult.transition, modeRouterDecision: stateResult.modeRouterDecision, errors: stateResult.errors },
       context_flags: contextFlags
     })
 
   } catch (err) {
     console.error('[Debug] Mode test error:', err)
-    return reply.status(500).send({
-      error: err.message,
-      stack: err.stack?.split('\n').slice(0, 8)
+    return reply.status(500).send({ error: err.message, stack: err.stack?.split('\n').slice(0, 8) })
+  }
+})
+
+// ────────────────────────────────────────────────────────────
+// ── Debug — Policy Layer test (Día 5) ────────────────────────
+// ────────────────────────────────────────────────────────────
+app.post('/debug/policy-test', async (req, reply) => {
+  const startTime = Date.now()
+  const { mensaje, telefono, tenantId = 'peru_exporta' } = req.body || {}
+
+  if (!mensaje || !telefono) {
+    return reply.status(400).send({
+      error: 'Body must include both "mensaje" and "telefono"',
+      example: { mensaje: 'esta caro pe, mucha plata', telefono: '51938188585' }
     })
+  }
+
+  try {
+    const builtContext = await buildPerceptionContext({ telefono, mensaje, tenantId })
+    const leadId = builtContext.contexto.lead_id
+    const contextFlags = builtContext.contexto.flags
+
+    if (!leadId) {
+      return reply.status(404).send({ error: 'Lead does not exist.', telefono })
+    }
+
+    const perceptionStart = Date.now()
+    const perception = await analizarMensaje({ mensaje, telefono, tenantId, saveTrace: true })
+    perception.meta = perception.meta || {}
+    perception.meta.mensaje_original = mensaje
+    const perceptionLatency = Date.now() - perceptionStart
+
+    const stateStart = Date.now()
+    const stateResult = await actualizarEstado({ perception, leadId, telefono, contextFlags })
+    const stateLatency = Date.now() - stateStart
+
+    const totalLatency = Date.now() - startTime
+    const policyDecision = stateResult.policyDecision
+
+    return reply.send({
+      ok: stateResult.ok,
+      _endpoint_latency_ms: totalLatency,
+      summary: {
+        lead_id: leadId,
+        telefono,
+        mensaje,
+        intents: perception.intents,
+        intent_specific: perception.intent_specific,
+        conversational_pattern: perception.conversational_pattern?.pattern,
+        state_before: stateResult.stateBefore ? `[${stateResult.stateBefore.mode}] stage=${stateResult.stateBefore.stage}` : null,
+        state_after: stateResult.leadState ? describeLeadState(stateResult.leadState) : null,
+        mode_router_summary: stateResult.modeRouterDecision ? summarizeModeDecision(stateResult.modeRouterDecision) : null,
+        policy_summary: policyDecision ? summarizeFullPolicyDecision(policyDecision) : 'policy not executed',
+        action_type: policyDecision?.action?.type || null,
+        action_strategy: policyDecision?.action?.strategy || null,
+        bot_should_respond: policyDecision?.action?.bot_should_respond ?? null,
+        rule_matched: policyDecision?.rule_matched || null,
+        guardrails_blocking: policyDecision?.guardrails?.blocking_names || [],
+        latency: { perception_ms: perceptionLatency, state_ms: stateLatency, total_ms: totalLatency }
+      },
+      policy: policyDecision ? {
+        action: policyDecision.action,
+        guardrails: policyDecision.guardrails,
+        rule_matched: policyDecision.rule_matched,
+        decision_path: policyDecision.decision_path,
+        candidates: policyDecision.candidates,
+        input_snapshot: policyDecision.input_snapshot,
+        meta: policyDecision.meta,
+        ok: policyDecision.ok,
+        errors: policyDecision.errors
+      } : null,
+      perception_summary: {
+        intents: perception.intents,
+        intent_specific: perception.intent_specific,
+        pattern: perception.conversational_pattern?.pattern,
+        entities: perception.entities,
+        temperature: perception.sentiment?.temperature
+      },
+      state_summary: {
+        ok: stateResult.ok,
+        currentStage: stateResult.leadState?.currentStage,
+        currentMode: stateResult.leadState?.currentMode,
+        slotsFilled: stateResult.leadState?.slotsFilled,
+        transition_reason: stateResult.transition?.transition_reason
+      },
+      context_flags: contextFlags
+    })
+
+  } catch (err) {
+    console.error('[Debug] Policy test error:', err)
+    return reply.status(500).send({ error: err.message, stack: err.stack?.split('\n').slice(0, 8) })
   }
 })
 
 // ════════════════════════════════════════════════════════════════
-// ── Debug — Policy Layer test (Día 5) ────────────────────────────
-// Pipeline completo: Perception → State → ModeRouter → Policy
-// 
+// ── Debug — Response Layer test (Día 6) ──────────────────────────
+// Pipeline completo: Perception → State → ModeRouter → Policy → Response
+//
 // Body:
 //   { mensaje: string, telefono: string }
 //
-// Devuelve TODO el trace de Policy:
-//   - acción decidida + estrategia
-//   - guardrails evaluados/bloqueados
-//   - decision_path completo
-//   - pool inicial vs filtrado
+// Devuelve:
+//   - El TEXTO generado por el bot (lo más importante)
+//   - Audit completo del Response Layer
+//   - Decisiones de todas las capas previas
 // ════════════════════════════════════════════════════════════════
-app.post('/debug/policy-test', async (req, reply) => {
+app.post('/debug/response-test', async (req, reply) => {
   const startTime = Date.now()
   const { mensaje, telefono, tenantId = 'peru_exporta' } = req.body || {}
 
@@ -409,17 +468,17 @@ app.post('/debug/policy-test', async (req, reply) => {
     const contextFlags = builtContext.contexto.flags
 
     if (!leadId) {
-      return reply.status(404).send({
-        error: 'Lead does not exist.',
-        telefono
-      })
+      return reply.status(404).send({ error: 'Lead does not exist.', telefono })
     }
 
-    // ─── 2. Pipeline completo Perception → State → ModeRouter → Policy ───
+    // ─── 2. Pipeline completo Perception → State → ModeRouter → Policy → Response ───
     const perceptionStart = Date.now()
     const perception = await analizarMensaje({
       mensaje, telefono, tenantId, saveTrace: true
     })
+    // Asegurar que el mensaje original esté disponible para Response Layer
+    perception.meta = perception.meta || {}
+    perception.meta.mensaje_original = mensaje
     const perceptionLatency = Date.now() - perceptionStart
 
     const stateStart = Date.now()
@@ -430,24 +489,29 @@ app.post('/debug/policy-test', async (req, reply) => {
 
     const totalLatency = Date.now() - startTime
 
-    // ─── 3. Construir respuesta enriquecida con foco en Policy ───
+    const botResponse = stateResult.botResponse
     const policyDecision = stateResult.policyDecision
 
+    // ─── 3. Construir respuesta enriquecida con FOCO en Response ───
     return reply.send({
       ok: stateResult.ok,
       _endpoint_latency_ms: totalLatency,
 
-      // ─── Resumen ejecutivo ───
+      // ─── 🎯 LO MÁS IMPORTANTE: el texto generado por el bot ───
+      bot_text: botResponse?.text || null,
+      bot_responded: botResponse?.bot_responded || false,
+
+      // ─── Resumen ejecutivo del pipeline completo ───
       summary: {
         lead_id: leadId,
         telefono,
         mensaje,
-        
+
         // Perception
         intents: perception.intents,
         intent_specific: perception.intent_specific,
         conversational_pattern: perception.conversational_pattern?.pattern,
-        
+
         // State
         state_before: stateResult.stateBefore
           ? `[${stateResult.stateBefore.mode}] stage=${stateResult.stateBefore.stage}`
@@ -455,22 +519,29 @@ app.post('/debug/policy-test', async (req, reply) => {
         state_after: stateResult.leadState
           ? describeLeadState(stateResult.leadState)
           : null,
-        
+
         // Mode Router
         mode_router_summary: stateResult.modeRouterDecision
           ? summarizeModeDecision(stateResult.modeRouterDecision)
           : null,
 
-        // ⭐ Policy (lo principal de este endpoint)
+        // Policy
         policy_summary: policyDecision
           ? summarizeFullPolicyDecision(policyDecision)
-          : 'policy not executed',
+          : null,
         action_type: policyDecision?.action?.type || null,
         action_strategy: policyDecision?.action?.strategy || null,
-        bot_should_respond: policyDecision?.action?.bot_should_respond ?? null,
-        rule_matched: policyDecision?.rule_matched || null,
-        guardrails_blocking: policyDecision?.guardrails?.blocking_names || [],
-        
+
+        // ⭐ Response (lo principal de este endpoint)
+        response_summary: botResponse
+          ? summarizeBotResponse(botResponse)
+          : 'response not executed',
+        generation_method: botResponse?.generation?.method || null,
+        text_length: botResponse?.text?.length || 0,
+        response_cost_usd: botResponse?.audit?.cost_usd || 0,
+        response_latency_ms: botResponse?.audit?.latency_ms || 0,
+        llm_failed: botResponse?.audit?.llm_failed || false,
+
         latency: {
           perception_ms: perceptionLatency,
           state_ms: stateLatency,
@@ -478,17 +549,14 @@ app.post('/debug/policy-test', async (req, reply) => {
         }
       },
 
-      // ─── Policy completo (audit trail) ───
-      policy: policyDecision ? {
-        action: policyDecision.action,
-        guardrails: policyDecision.guardrails,
-        rule_matched: policyDecision.rule_matched,
-        decision_path: policyDecision.decision_path,
-        candidates: policyDecision.candidates,
-        input_snapshot: policyDecision.input_snapshot,
-        meta: policyDecision.meta,
-        ok: policyDecision.ok,
-        errors: policyDecision.errors
+      // ─── Response completo (audit trail) ───
+      response: botResponse ? {
+        ok: botResponse.ok,
+        bot_responded: botResponse.bot_responded,
+        text: botResponse.text,
+        generation: botResponse.generation,
+        audit: botResponse.audit,
+        meta: botResponse.meta
       } : null,
 
       // ─── Datos de soporte ───
@@ -497,8 +565,17 @@ app.post('/debug/policy-test', async (req, reply) => {
         intent_specific: perception.intent_specific,
         pattern: perception.conversational_pattern?.pattern,
         entities: perception.entities,
-        temperature: perception.sentiment?.temperature
+        temperature: perception.sentiment?.temperature,
+        rationale: perception.rationale
       },
+
+      policy_summary: policyDecision ? {
+        action_type: policyDecision.action?.type,
+        strategy: policyDecision.action?.strategy,
+        bot_should_respond: policyDecision.action?.bot_should_respond,
+        rule_matched: policyDecision.rule_matched,
+        guardrails_blocking: policyDecision.guardrails?.blocking_names || []
+      } : null,
 
       state_summary: {
         ok: stateResult.ok,
@@ -512,7 +589,7 @@ app.post('/debug/policy-test', async (req, reply) => {
     })
 
   } catch (err) {
-    console.error('[Debug] Policy test error:', err)
+    console.error('[Debug] Response test error:', err)
     return reply.status(500).send({
       error: err.message,
       stack: err.stack?.split('\n').slice(0, 8)
@@ -534,33 +611,16 @@ app.post('/debug/run-perception-evals', async (req, reply) => {
       .split('\n')
       .filter(line => line.trim().length > 0)
       .map((line, i) => {
-        try {
-          return JSON.parse(line)
-        } catch (err) {
-          console.error(`[Evals] Línea ${i + 1} inválida:`, err.message)
-          return null
-        }
+        try { return JSON.parse(line) } catch (err) { console.error(`[Evals] Línea ${i + 1} inválida:`, err.message); return null }
       })
       .filter(Boolean)
 
     let perceptionEvals = allEvals.filter(e => e.expected?.perception_intent)
+    if (idFilter) perceptionEvals = perceptionEvals.filter(e => idFilter.includes(e.id))
+    if (categoryFilter) perceptionEvals = perceptionEvals.filter(e => e.category === categoryFilter)
 
-    if (idFilter) {
-      perceptionEvals = perceptionEvals.filter(e => idFilter.includes(e.id))
-    }
-    if (categoryFilter) {
-      perceptionEvals = perceptionEvals.filter(e => e.category === categoryFilter)
-    }
-
-    const ejecutables = perceptionEvals.filter(e => {
-      const msg = e.input?.lead_message
-      return msg && typeof msg === 'string' && msg.trim().length > 0
-    })
-
-    const noEjecutables = perceptionEvals.filter(e => {
-      const msg = e.input?.lead_message
-      return !msg || typeof msg !== 'string' || msg.trim().length === 0
-    })
+    const ejecutables = perceptionEvals.filter(e => { const msg = e.input?.lead_message; return msg && typeof msg === 'string' && msg.trim().length > 0 })
+    const noEjecutables = perceptionEvals.filter(e => { const msg = e.input?.lead_message; return !msg || typeof msg !== 'string' || msg.trim().length === 0 })
 
     const CHUNK_SIZE = 3
     const SLEEP_BETWEEN_CHUNKS_MS = 1000
@@ -568,19 +628,14 @@ app.post('/debug/run-perception-evals', async (req, reply) => {
 
     for (let i = 0; i < ejecutables.length; i += CHUNK_SIZE) {
       const chunk = ejecutables.slice(i, i + CHUNK_SIZE)
-      const chunkResults = await Promise.all(
-        chunk.map(async (evalCase) => runSingleEval(evalCase))
-      )
+      const chunkResults = await Promise.all(chunk.map(async (evalCase) => runSingleEval(evalCase)))
       details.push(...chunkResults)
-      if (i + CHUNK_SIZE < ejecutables.length) {
-        await sleep(SLEEP_BETWEEN_CHUNKS_MS)
-      }
+      if (i + CHUNK_SIZE < ejecutables.length) await sleep(SLEEP_BETWEEN_CHUNKS_MS)
     }
 
     const passed = details.filter(d => d.status === 'passed').length
     const failed = details.filter(d => d.status === 'failed').length
     const errors = details.filter(d => d.status === 'error').length
-
     const totalCost = details.reduce((sum, d) => sum + (d.cost_usd || 0), 0)
     const totalLatency = details.reduce((sum, d) => sum + (d.latency_ms || 0), 0)
     const avgLatency = details.length > 0 ? Math.round(totalLatency / details.length) : 0
@@ -597,195 +652,7 @@ app.post('/debug/run-perception-evals', async (req, reply) => {
         avg_latency_ms: avgLatency,
         total_runtime_ms: Date.now() - startTime
       },
-      passed_evals: details.filter(d => d.status === 'passed').map(d => ({
-        id: d.eval_id, category: d.category,
-        expected: d.expected_intent, got: d.got_summary
-      })),
-      failed_evals: details.filter(d => d.status === 'failed').map(d => ({
-        id: d.eval_id, category: d.category,
-        expected: d.expected_intent, expected_level: d.expected_level,
-        got_intents: d.got_intents, got_intent_specific: d.got_intent_specific,
-        got_pattern: d.got_pattern, rationale: d.rationale, diagnosis: d.diagnosis,
-        latency_ms: d.latency_ms, cost_usd: d.cost_usd
-      })),
-      error_evals: details.filter(d => d.status === 'error').map(d => ({
-        id: d.eval_id, category: d.category,
-        error: d.error, latency_ms: d.latency_ms
-      })),
+      passed_evals: details.filter(d => d.status === 'passed').map(d => ({ id: d.eval_id, category: d.category, expected: d.expected_intent, got: d.got_summary })),
+      failed_evals: details.filter(d => d.status === 'failed').map(d => ({ id: d.eval_id, category: d.category, expected: d.expected_intent, expected_level: d.expected_level, got_intents: d.got_intents, got_intent_specific: d.got_intent_specific, got_pattern: d.got_pattern, rationale: d.rationale, diagnosis: d.diagnosis, latency_ms: d.latency_ms, cost_usd: d.cost_usd })),
+      error_evals: details.filter(d => d.status === 'error').map(d => ({ id: d.eval_id, category: d.category, error: d.error, latency_ms: d.latency_ms })),
       skipped_evals: noEjecutables.map(e => ({
-        id: e.id, category: e.category,
-        reason: 'requires_sequence_evaluation_not_perception'
-      }))
-    })
-  } catch (err) {
-    console.error('[Evals] Fatal error:', err)
-    return reply.status(500).send({
-      error: err.message,
-      stack: err.stack?.split('\n').slice(0, 8)
-    })
-  }
-})
-
-async function runSingleEval(evalCase, retryCount = 0) {
-  const startTime = Date.now()
-  const expectedIntent = evalCase.expected.perception_intent
-  const expectedLevel = classifyExpectedIntent(expectedIntent)
-
-  try {
-    const result = await analizarMensajeStateless({
-      mensaje: evalCase.input.lead_message,
-      contexto: evalCase.input.context || {},
-      tenantId: 'peru_exporta'
-    })
-
-    if (result._is_fallback && retryCount < 1) {
-      await sleep(2000)
-      return runSingleEval(evalCase, retryCount + 1)
-    }
-
-    let passed = false
-    let diagnosis = null
-
-    if (expectedLevel === 'level_1') {
-      passed = result.intents?.includes(expectedIntent)
-      if (!passed) {
-        diagnosis = `Expected "${expectedIntent}" in intents[], got [${result.intents?.join(', ')}]`
-      }
-    } else if (expectedLevel === 'level_2') {
-      passed = result.intent_specific === expectedIntent
-      if (!passed) {
-        if (result.intent_specific === null) {
-          diagnosis = `Expected intent_specific="${expectedIntent}" but got null. Parent intent was [${result.intents?.join(', ')}]`
-        } else {
-          diagnosis = `Expected intent_specific="${expectedIntent}" but got "${result.intent_specific}"`
-        }
-      }
-    } else if (expectedLevel === 'level_3') {
-      passed = result.conversational_pattern?.pattern === expectedIntent
-      if (!passed) {
-        diagnosis = `Expected conversational_pattern="${expectedIntent}" but got ${
-          result.conversational_pattern?.pattern || 'null'
-        }`
-      }
-    } else {
-      diagnosis = `Unknown expected level for "${expectedIntent}"`
-    }
-
-    return {
-      eval_id: evalCase.id,
-      category: evalCase.category,
-      status: passed ? 'passed' : 'failed',
-      expected_intent: expectedIntent,
-      expected_level: expectedLevel,
-      got_intents: result.intents,
-      got_intent_specific: result.intent_specific,
-      got_pattern: result.conversational_pattern?.pattern || null,
-      got_summary: passed ? `${expectedIntent} ✓` : null,
-      rationale: result.rationale,
-      diagnosis,
-      latency_ms: Date.now() - startTime,
-      cost_usd: result.meta?.cost_usd || 0,
-      _retried: retryCount > 0
-    }
-  } catch (err) {
-    return {
-      eval_id: evalCase.id,
-      category: evalCase.category,
-      status: 'error',
-      error: err.message,
-      expected_intent: expectedIntent,
-      latency_ms: Date.now() - startTime,
-      cost_usd: 0
-    }
-  }
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-// ── Auth ─────────────────────────────────────────────────────
-app.get('/auth/vendors',  async (req, reply) => getVendorNames(req, reply, prisma))
-app.post('/auth/login',   async (req, reply) => loginVendor(req, reply, prisma))
-
-// ── Webhook ──────────────────────────────────────────────────
-app.post('/webhook', async (req, reply) => handleWebhook(req, reply, prisma))
-app.get('/webhook',  async () => ({ status: 'webhook activo', version: '5.0.0' }))
-
-// ── Leads ────────────────────────────────────────────────────
-app.get('/leads',                async (req, reply) => getLeads(req, reply, prisma))
-app.put('/leads/:id',            async (req, reply) => updateLead(req, reply, prisma))
-app.post('/leads/:id/mensaje',   async (req, reply) => sendMensaje(req, reply, prisma))
-app.post('/leads/:id/accion',    async (req, reply) => doAccion(req, reply, prisma))
-app.get('/leads/:id/mensajes',   async (req, reply) => getMensajes(req, reply, prisma))
-app.get('/reportes',             async (req, reply) => getReportes(req, reply, prisma))
-
-// ── Config ───────────────────────────────────────────────────
-app.get('/config/bot',  async (req, reply) => getBotConfig(req, reply, prisma))
-app.put('/config/bot',  async (req, reply) => updateBotConfig(req, reply, prisma))
-app.get('/config/vendedores',                async (req, reply) => getVendedores(req, reply, prisma))
-app.post('/config/vendedores',               async (req, reply) => createVendedor(req, reply, prisma))
-app.put('/config/vendedores/:id',            async (req, reply) => updateVendedor(req, reply, prisma))
-app.put('/config/vendedores/:id/desactivar', async (req, reply) => desactivarVendedor(req, reply, prisma))
-
-// ── Campaigns ────────────────────────────────────────────────
-app.get('/campaigns',                      async (req, reply) => getCampaigns(req, reply, prisma))
-app.get('/campaigns/:id',                  async (req, reply) => getCampaign(req, reply, prisma))
-app.post('/campaigns',                     async (req, reply) => createCampaign(req, reply, prisma))
-app.put('/campaigns/:id',                  async (req, reply) => updateCampaign(req, reply, prisma))
-app.delete('/campaigns/:id',               async (req, reply) => deleteCampaign(req, reply, prisma))
-app.put('/campaigns/:id/steps',            async (req, reply) => saveSteps(req, reply, prisma))
-app.post('/campaigns/:id/triggers',        async (req, reply) => addTrigger(req, reply, prisma))
-app.delete('/campaigns/:id/triggers/:tid', async (req, reply) => deleteTrigger(req, reply, prisma))
-app.post('/campaigns/test-trigger',        async (req, reply) => testTrigger(req, reply, prisma))
-app.patch('/campaigns/:id/activar',        async (req, reply) => activarCampaign(req, reply, prisma))
-
-// ── Vendors ──────────────────────────────────────────────────
-app.get('/vendors', async (req, reply) => {
-  const vendors = await prisma.vendor.findMany({
-    where: { activo: true },
-    select: { id: true, nombre: true, telefono: true, role: true, instanciaEvolution: true }
-  })
-  return vendors
-})
-
-// ── Cron ─────────────────────────────────────────────────────
-app.get('/cron/followup', async (req, reply) => {
-  const secret = req.headers['x-cron-secret'] || req.query.secret
-  if (secret !== process.env.CRON_SECRET) return reply.status(401).send({ error: 'Unauthorized' })
-  try {
-    const result = await ejecutarFollowup(prisma)
-    console.log(`[Cron] Followup ejecutado: ${result.procesados} leads`)
-    return reply.send({ ok: true, ...result })
-  } catch (err) {
-    console.error('[Cron] Error:', err.message)
-    return reply.status(500).send({ error: err.message })
-  }
-})
-
-// ── Start ────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || '3000')
-const HOST = process.env.HOST || '0.0.0.0'
-
-try {
-  await prisma.$connect()
-  console.log('✅ PostgreSQL conectado')
-  await app.listen({ port: PORT, host: HOST })
-  console.log(`
-╔════════════════════════════════════════╗
-║   Hidata — WhatsApp Sales ERP v20      ║
-║   Puerto: ${PORT}                          ║
-║   Día 5: + Policy Layer                ║
-╚════════════════════════════════════════╝
-  `)
-} catch (error) {
-  console.error('❌ Error arrancando servidor:', error)
-  await prisma.$disconnect()
-  process.exit(1)
-}
-
-process.on('SIGTERM', async () => {
-  await app.close()
-  await prisma.$disconnect()
-  process.exit(0)
-})
