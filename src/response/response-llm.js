@@ -173,7 +173,7 @@ async function callWithTimeout(prompt, timeoutMs) {
     try {
       const result = await callGemini({
         model: MODEL,
-        prompt,
+        contents: prompt,
         temperature: TEMPERATURE,
         maxOutputTokens: MAX_OUTPUT_TOKENS,
         tenantId: 'peru_exporta'
